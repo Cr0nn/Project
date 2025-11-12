@@ -1,3 +1,4 @@
+#Точка входа работы программы
 import pandas as pd
 import numpy as np
 from config import TICKERS, APITOKEN
@@ -18,3 +19,4 @@ chrome_options.add_argument("--headless")
 driver = webdriver.Chrome(service=Service("C:\\Users\\Cronn\\stock_analyzer\\chromedriver.exe"), options=chrome_options)
 start()
 driver.quit
+
