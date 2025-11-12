@@ -1,10 +1,10 @@
+#Файл для парсинга всей информации со SmartLab
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
-from data.processor import format_number
 import time
 
 
@@ -31,6 +31,7 @@ def get_info(driver, ticker, time, em_id):
     time_d = {
         "Период" : time
     }
+
     url = f"https://smart-lab.ru/q/{ticker}/f/{time}/"
     driver.get(url)
     table = WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.XPATH, "//table[contains(@class, 'simple-little-table') and contains(@class, 'financials')]")))
@@ -48,10 +49,14 @@ def get_info(driver, ticker, time, em_id):
                     value_d[name] = None
                 else:
                     value_d[name] = value[i+1].text
+                    
 
         time_d[str(years[i])] = value_d
-    return {em_id : time_d} 
-        
+    return {em_id : time_d}  #Вся инфа из таблицы
+
+    
+
+            
 def get_sector_name(driver, ticker):
     url = f"https://smart-lab.ru/q/{ticker}/f/y/"
     driver.get(url)
