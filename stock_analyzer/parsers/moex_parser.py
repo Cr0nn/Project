@@ -1,3 +1,4 @@
+#Файл для работы с MOEX API
 import requests
 import numpy as np
 
@@ -23,6 +24,26 @@ def get_moex_data(ticker):
     
         return market_data[12]
     
+def get_tickers():
+
+    url = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json?securities.columns=SECID"
+    response = requests.get(url)
+    data = response.json()
+    
+    row = data['securities']['data']
+    return [i[0] for i in row]
+
+    
+def get_moex_sector(Tic):
+    url = f"https://iss.moex.com/iss/securities/{Tic}/indices.json"
+    response = requests.get(url)
+    data = response.json()
+    sector_info = data["indices"]["data"]
+    for j in sector_info:
+        if ("РТС" in j[1]) and ("широкого рынка" not in j[1]) and (j[1] != 'Индекс РТС'):
+            return j[1]
+    return "Нет информации"
+
 def get_security_info(ticker: str):
 
     url = f"https://iss.moex.com/iss/securities/{ticker}.json"
@@ -54,6 +75,11 @@ def get_inn_and_okpo(id: str):
         "okpo" : info[0][5]
     }
 
+def get_base_info(ticker: str):
+    data_info = get_security_info(ticker)
+    inn_okpo = get_inn_and_okpo(data_info["EMITTER_ID"])
+    return {"EMITTER_ID": data_info["EMITTER_ID"], "NAME": data_info["NAME"], "inn" : inn_okpo["inn"], "okpo": inn_okpo["okpo"]}
+
 def get_last_price(tickers: str):
 
     url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json?iss.only=marketdata"
@@ -83,10 +109,10 @@ def get_last_price(tickers: str):
 
 
 
-
         
     
     
     
     
+
 
