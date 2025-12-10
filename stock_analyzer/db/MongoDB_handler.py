@@ -5,6 +5,9 @@ from numpy import average, median
 import numpy as np
 from config import MONGODB_URI
 from config import DB_NAME
+from datetime import datetime, timedelta
+
+
 
 client = MongoClient(MONGODB_URI)
 db = client[DB_NAME]
@@ -37,14 +40,36 @@ def update_compains_info(data, id):
 
 def get_all_tickers():
     companies_collection = db['Companies']
-    docs = companies_collection.find({}, {'ticker' : 1})
-    return [i['ticker'] for i in docs]
+    pipeline = [
+        {
+            '$project' : 
+                {
+                    '_id':0,
+                    'ticker':'$ticker'
+                }
+        }
+    ]
+    collection = list(companies_collection.aggregate(pipeline))
+    return [i['ticker'] for i in collection]
+
+def get_all_name():
+    companies_collection = db["Companies"]
+    pipeline = [
+        {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "name" : "$name"
+                }
+        }
+    ]
+    collection = list(companies_collection.aggregate(pipeline))
+    return [i["name"] for i in collection]
 
 def find_info(em_id):
     collections = db["Finans_info"]
     docs = collections.find({
-        em_id : {'$exists':True},
-        em_id : {'$type': 'object'}
+        "id" : em_id
     })
     return docs 
 
@@ -54,12 +79,76 @@ def get_all_em_id():
     result = [i["_id"] for i in docs]
     return result #Все id Компаний
 
+
+def debug_structure():
+    collection = db["Price_info"]
+    """
+    Показывает реальную структуру документов для отладки
+    """
+    # Найдем последний документ
+    last_doc = collection.find_one(sort=[('date', -1)])
+    
+    if last_doc:
+        print("Структура документа:")
+        print(f"Date: {last_doc['date']}")
+        print(f"Minute_data length: {len(last_doc.get('minute_data', []))}")
+        
+        if last_doc.get('minute_data'):
+            print("\nПервые 3 элемента minute_data:")
+            for i, minute in enumerate(last_doc['minute_data'][:3]):
+                print(f"  [{i}]: timestamp={minute.get('timestamp')}")
+                print(f"       prices keys: {list(minute.get('prices', {}).keys())[:5]}")  # Первые 5 ключей
+                
+        print("\nПолная структура одного элемента minute_data:")
+        if last_doc.get('minute_data'):
+            import json
+            print(json.dumps(last_doc['minute_data'][0], indent=2, default=str))
+
+
+                
+    
 # def find_all_sector():
 #     collections = db[""]
 #     docs = collections.find_one({"_id":"Sectors"})
 #     all_sector = [key for key, value in docs.items() if key != "_id"]
 #     all_sector.append("Все секторы")
 #     return all_sector
+
+
+def insert_current_price(data_dict):
+
+    
+    try:
+        collection = db["Price_info"]
+        date_value = data_dict['date']
+        day_date = date_value.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Удаляем дату из словаря, оставшиеся ключи - тикеры
+        data_without_date = data_dict.copy()
+        del data_without_date['date']
+        
+        # Создаем минутную запись
+        minute_record = {
+            'timestamp': date_value,
+            **data_without_date  # Распаковываем все тикеры напрямую
+        }
+        
+        print(f"Данные для записи: {minute_record}")
+        
+        result = collection.update_one(
+            {'date': day_date},
+            {
+                '$push': {'minute_data': minute_record},
+                '$setOnInsert': {'date': day_date}
+            },
+            upsert=True
+        )
+        
+        return result
+        
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        return None
 
 def get_em_name(em_id):
     collections = db["Companies"]
@@ -95,6 +184,52 @@ def get_none_value(TICKERS): #Тест функция, пока будет
             all_none.append(collections1.find_one({"_id":id})["ticker"])
     return all_none
 
+def get_last_hour_price(ticker):
+    collection = db["Price_info"]
+    indexes = list(collection.list_indexes())
+    if len(indexes) == 0:
+        collection.create_index([("date", 1), ("minute_data.timestamp", 1)], name="date_timestamp_index")
+        indexes = list(collection.list_indexes())
+
+    end_time = datetime.now()
+    start_time = end_time - timedelta(hours=1)
+    
+    print(f"Поиск {ticker} с {start_time} по {end_time}")
+    
+    pipeline = [
+        {
+            '$match': {
+                'date': start_time.replace(hour=0, minute=0, second=0, microsecond=0)
+            }
+        },
+        {
+            '$unwind': '$minute_data'
+        },
+        {
+            '$match': {
+                'minute_data.timestamp': {
+                    '$gte': start_time,
+                    '$lte': end_time
+                },
+                f'minute_data.{ticker}': {'$exists': True, '$ne': None}   #Ограничение за последний час, пока убрал
+            }
+        },
+        {
+            '$project': {
+                '_id': 0,  # Исключаем _id
+                'timestamp': '$minute_data.timestamp',
+                'price': f'$minute_data.{ticker}'
+            }
+        },
+        {
+            '$sort': {'timestamp': 1}
+        }
+    ]
+    
+    collection = list(collection.aggregate(pipeline))
+    print(f"Найдено {len(collection)} записей из 60 возможных для {ticker}")
+    return collection #Возвращает список из dict вида {'timestamp': datetime.datetime(2025, 11, 18, 19, 49, 29, 560000), 'price': 121.34}
+
 
 def PE_filter(Companies):
     collections1 = db["Companies"]
@@ -104,37 +239,73 @@ def PE_filter(Companies):
     avg = []
     for i in Companies:
         Current_PE = []
-        id = collections1.find_one({"name":i})["_id"]
-        Compain = collections2.find_one({id:{'$exists':True}})[id]
-        try:
-            for j in Compain:
-                if j != "Период":
-                    Current_PE.append(float(none_check(Compain[j]["P/E"])))
-            PE[i] = ([round(average(Current_PE),2), round(Current_PE[-1],2)])
-            avg.append(round(average(Current_PE),2))
-        except Exception as e:
-            print(f"Ошибка в компании {j} вида {e}")
-            continue
-    return PE, round(average(avg),2)
+        pipeline = [
+            {
+                "$lookup": {
+                    "from": "Companies",
+                    "localField": "id", 
+                    "foreignField": "_id",
+                    "as": "Company"
+                }
+            },
+            {
+                "$unwind" : "$Company"
+            },
+            {
+                "$match" : {"Company.name" : i}
+            },
+            {
+                "$project" : 
+                    {
+                        "document_id" : "$_id",
+                        "info_array" : {"$objectToArray" : "$info"}
+                    }
+            },
+            {
+                "$project" :
+                    {
+                        "document_id": 1,
+                        "pe_metrics":
+                            {
+                                "$map" :
+                                    {
+                                        "input" : 
+                                            {
+                                                "$filter" : 
+                                                    {
+                                                        "input" : "$info_array",
+                                                        "as" : "item",
+                                                        "cond" : {"$ne" : ["$$item.k", "Период"]}
+                                                    }
+                                            },
+                                        "as" : "year_data",
+                                        "in" : 
+                                            {
+                                                "k": "$$year_data.k",
+                                                "v": 
+                                                    {"$convert":
+                                                        {
+                                                            "input" : "$$year_data.v.P/E",
+                                                            "to" : "double",
+                                                            "onError" : 0.0,
+                                                            "onNull" : 0.0
+                                                        }
+                                                    }
+                                            }
+                                    }
+                            }
+                    }
+            },
+            {
+                "$project" : {"_id": 0, "PE" : '$pe_metrics'}
+            }
+        ]
 
-def div_filter(Companies):
-    collections1 = db["Companies"]
-    collections2 = db["Finans_info"]
-    Filtred = []
-    for i in Companies:
-        div_yield = []
-        id = collections1.find_one({"name":i})["_id"]
-        Compain = collections2.find_one({id:{'$exists': True}})[id]
-        try:
-            for j in Compain:
-                if j != "Период":
-                    if Compain[j]["Див доход, ао, %"] != None:
-                        div_yield.append(Compain[j]["Див доход, ао, %"])
-            if ("0%" not in div_yield) and ("0.0%" not in div_yield):
-                Filtred.append(i)
-        except:
-            continue
-    return Filtred
+        collection = list(collections2.aggregate(pipeline))[0]['PE']
+        filtred_pe = np.array([i['v'] for i in collection])
+        PE[i] = [round(average(filtred_pe),2), filtred_pe]
+        avg.append(round(average(filtred_pe),2))
+    return PE, average(avg)
 
 def debt_filter(Companies):
     collections1 = db["Companies"]
@@ -207,43 +378,357 @@ def debt_filter(Companies):
         except Exception as e:
             print(e)
     return debt_dict
+def div_filter(Companies):
+    collections1 = db["Companies"]
+    collections2 = db["Finans_info"]
+    Filtred = []
+    for i in Companies:
+        div_yield = []
+        pipeline = [
+            {
+                "$lookup": {
+                    "from": "Companies",
+                    "localField": "id", 
+                    "foreignField": "_id",
+                    "as": "Company"
+                }
+            },
+            {
+                "$unwind" : "$Company"
+            },
+            {
+                "$match" : {"Company.name" : i}
+            },
+            {
+                "$project" : 
+                    {
+                        "document_id" : "$_id",
+                        "info_array" : {"$objectToArray" : "$info"}
+                    }
+            },
+            {
+                "$project" :
+                    {
+                        "document_id": 1,
+                        "div_metric":
+                            {
+                                "$map" :
+                                    {
+                                        "input" : 
+                                            { 
+                                                "$filter" : 
+                                                    {
+                                                        "input" : "$info_array",
+                                                        "as" : "item",
+                                                        "cond" : {"$ne" : ["$$item.k", "Период"]}
+                                                    }
+                                            },
 
-def ROE_filter(Companies):
+                                        "as" : "year_data",
+                                        "in" : 
+                                            {
+                                                "k": "$$year_data.k",
+                                                "v": 
+                                                    {"$convert":
+                                                        {
+                                                            "input" : {
+                                                               "$replaceOne":
+                                                                {
+                                                                    "input" : "$$year_data.v.Див доход, ао, %",
+                                                                    "find" : "%",
+                                                                    "replacement" : ""
+                                                                } 
+                                                            },
+                                                            "to" : "double",
+                                                            "onError" : 0.0,
+                                                            "onNull" : 0.0
+                                                        }
+                                                    }
+                                            }
+                                    }
+                            }
+                    }
+            },
+            {
+                "$project" : {"_id": 0, "div" : '$div_metric'}
+            }
+
+        ]
+        collection = list(collections2.aggregate(pipeline))[0]['div']
+        filtred_div = np.array([i['v'] for i in collection])
+        if not np.any(filtred_div == 0.0):
+            Filtred.append(i)
+    return Filtred
+
+def ROE_filter(Companies, sector):
     collections1 = db["Companies"]
     collections2 = db["Finans_info"]
     none_check = lambda x: "0" if x is None or x == "null" else x.replace(" ", "").replace("%", "") #Функция отлавливания значений None в таблице + замена пробелов в числах формата 1 689
     ROE = {}
     avg = []
     for i in Companies:
-        Current_ROE = []
-        id = collections1.find_one({"name":i})["_id"]
-        Compain = collections2.find_one({id:{'$exists':True}})[id]
-        for j in Compain:
-            data = Compain[j]
-            if j != "Период":
-                try:
-                    Current_ROE.append(float(none_check(data["ROE, %"])))
-                except:
-                    try: 
-                        Current_ROE.append(float(none_check(data["Рентабельность банка, %"]))) 
-                    except:
-                        try:
-                            profit = float(none_check(data.get("Чистая прибыль, млрд руб", "0")))
-                            equity = float(none_check(data.get("Чистые активы, млрд руб", data.get("Капитал, млрд руб", None))))
-                            if equity == 0.0: equity = round(float(none_check(data.get("Активы, млрд руб"))) - float(none_check(data.get("Долг, млрд руб"))),2)
-                            val = (profit / equity * 100) if equity != 0.0 else 0.0
-                            Current_ROE.append(val)
-                        except Exception as e:
-                            print(e)
-                            continue
-        print(Current_ROE, i)
-        ROE[i] = ([round(median(Current_ROE),2), round(Current_ROE[-1],2)])
-        avg.append(round(median(Current_ROE),2))
-    return ROE, median(avg)
+        pipeline = [
+            {
+            "$lookup" : 
+                {
+                    "from" : "Companies",
+                    "localField" : "id",
+                    "foreignField" : "_id",
+                    "as" : "Company"
+                }
+            },
+            {
+                "$unwind" : "$Company"
+            },
+            {
+                "$match" : {"Company.name":i}
+            },
+            {
+                "$project" : 
+                    {
+                        "document_id" : "$_id",
+                        "info_array" : {"$objectToArray" : "$info"}
+                    }
+            },
+            {
+                "$project" : 
+                    {
+                        "document_id" : 1,
+                        "ROE_metric" : {
+                            "$map" : 
+                                {
+                                    "input" : 
+                                    {
+                                        "$filter": 
+                                            {
+                                                "input" : "$info_array",
+                                                "as" : "item",
+                                                "cond" : {"$ne" : ["$$item.k", "Период"]}
+                                            }
+                                    },
+                                    "as" : "year_data",
+                                    "in" : 
+                                        {
+                                            "k": "$$year_data.k",
+                                            "v": 
+                                            {
+                                                "ROE": 
+                                                    {"$convert" :
+                                                        {
+                                                            "input" : 
+                                                            {
+                                                                "$replaceOne" : 
+                                                                    {
+                                                                        "input" : "$$year_data.v.ROE, %",
+                                                                        "find" : "%",
+                                                                        "replacement" : ""   
+                                                                    },
+                                                            },
+                                                            "to" : "double",
+                                                            "onError" : None,
+                                                            "onNull" : None
+                                                        }
+                                                    },
+                                                "ROE_alt":
+                                                    {
+                                                        "$convert": 
+                                                            {
+                                                                "input" : 
+                                                                {
+                                                                    "$replaceOne" : 
+                                                                        {
+                                                                            "input" : "$$year_data.v.Рентабельность банка, %",
+                                                                            "find" : "%",
+                                                                            "replacement" : ""
+                                                                        }
+                                                                },
+                                                                "to" : "double",
+                                                                "onError" : None,
+                                                                "onNull" : None
+                                                            }
+                                                    },
+                                                "profit" : 
+                                                    {
+                                                        "$convert":
+                                                        {
+                                                            "input" : "$$year_data.v.Чистая прибыль, млрд руб",
+                                                            "to" : "double",
+                                                            "onError" : None,
+                                                            "onNull" : None
+                                                        }
+                                                    },
+                                                "equity" : 
+                                                    {
+                                                        "$convert" : 
+                                                            {
+                                                                "input" : "$$year_data.v.Чистые активы, млрд руб",
+                                                                "to" : "double",
+                                                                "onError" : None,
+                                                                "onNull" : None
+                                                            }
+                                                    }                                      
+                                            }
+
+                                        }
+                                },
+                                
+                        }
+                    }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "ROE_dict": {
+                        "$map": {
+                            "input": "$ROE_metric",
+                            "as": "year_item",
+                            "in": {
+                                "k": "$$year_item.k",
+                                "v": {
+                                    "$arrayToObject": {
+                                        "$filter": {
+                                            "input": {"$objectToArray": "$$year_item.v"},
+                                            "as": "field",
+                                            "cond": {"$ne": ["$$field.v", None]}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+        collection = list(collections2.aggregate(pipeline))[0]["ROE_dict"]
+        keys = list(collection[0]["v"].keys())
+        if 'ROE' in keys:
+            ROE[i] = np.array([i["v"].get("ROE") for i in collection])
+        elif "ROE_alt" in keys:
+            ROE[i] = np.array([i["v"].get("ROE_alt") for i in collection])
+        elif "profit" in keys and "equity" in keys:
+            ROE[i] = (np.array([i["v"].get("profit") for i in collection]) / np.array([i["v"].get("equity") for i in collection])) * 100
+    return ROE, np.median(avg_metric(sector)[0]["values"])
+
 
 def init_sector(Company):
     collections1 = db["Companies"]
     return collections1.find_one({'name':Company})['sector']
+
+def avg_metric(sector):
+    collection1 = db["Companies"]           
+    collection2 = db["Finans_info"]
+    pipeline = [
+        {
+            "$lookup" : 
+                { 
+                    "from" : "Companies",
+                    "localField" : "id",
+                    "foreignField" : "_id",
+                    "as" : "Company"
+                }
+        },
+        {
+            "$match" : 
+                {
+                    "Company.sector" : sector
+                }
+        },
+        {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "years" : {"$objectToArray" : "$info"}
+                }           
+        },
+        {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "years" : 
+                        {
+                            "$filter" : 
+                                {
+                                    "input" : "$years",
+                                    "as" : "y",
+                                    "cond" : {"$regexMatch": {"input" : "$$y.k", "regex" : "^[0-9]{4}$"}}
+                                }
+                        }
+                }
+        },
+        {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "last" : 
+                        {
+                            "$arrayElemAt" : [
+                                {"$sortArray" : {"input" : "$years", "sortBy" : {"k" : -1}}},
+                                0
+                            ]
+                        }
+                }
+        },
+        {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "rawValue" : 
+                        {
+                            "$ifNull" : [
+                                "$last.v.ROE, %",
+                                "$last.v.Рентабельность банка, %"
+                            ]
+                        }
+                }
+        },
+        {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "value" : 
+                        {
+                            "$cond" : 
+                            [
+                                {"$eq" : ["$rawValue", None]},
+                                None,
+                                {
+                                    "$toDouble": 
+                                        {
+                                            "$replaceAll" : 
+                                                {
+                                                    "input" : 
+                                                        {
+                                                            "$replaceAll" : 
+                                                                {
+                                                                    "input" : "$rawValue",
+                                                                    "find" : "%",
+                                                                    "replacement" : ""
+                                                                }
+                                                        },
+                                                    "find" : " ",
+                                                    "replacement" : ""
+                                                }
+                                        }
+                                }
+                            ]
+
+                        }
+                }
+        },
+        {
+            "$match" : {"value" : {"$ne" : None}}
+        },
+        {
+            "$group" : 
+                {
+                    "_id" : 0,
+                    "values" : {"$push" : "$value"}
+                }
+        }
+
+    ]
+    return list(collection2.aggregate(pipeline))
+
 
 
 
