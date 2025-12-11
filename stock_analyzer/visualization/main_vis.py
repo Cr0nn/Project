@@ -4,18 +4,20 @@ from numpy import average
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget, QLabel, QComboBox,
     QGroupBox, QGridLayout, QHBoxLayout, QCheckBox, QMessageBox,
-    QRadioButton, QButtonGroup, QTableWidget
+    QRadioButton, QButtonGroup, QTableWidget, QTabWidget
 )
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from visualization.table_widget import create_table_widget, update_table_data
 from db.MongoDB_handler import (
     find_info, get_all_em_id, get_em_name, find_id_by_name, get_base_info,
-    get_companies_in_sector, div_filter, PE_filter, debt_filter, ROE_filter
+    get_companies_in_sector, div_filter, PE_filter, debt_filter, ROE_filter,
+    get_last_hour_price
 )
 from data.filter import (
     apply_filters, apply_PE_mode, apply_debt_mode, apply_ROE_mode, 
     parse_data
 )
+from visualization.graph import GraphWidget
 from utils.helpers import get_all_empty_sectors
 from visualization.data_loader import get_sample_data
 from visualization.em_layout import update_base_info
@@ -26,11 +28,18 @@ class StockAnalyzerApp(QMainWindow):
         self.setWindowTitle("Stock Analyzer")
         self.setGeometry(100, 100, 1000, 800)
 
-        # --- Основная структура ---
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        center_layout = QHBoxLayout(central_widget)
+        tabs = QTabWidget()
+        self.setCentralWidget(tabs)
+
+        #------------------------------------- Первая вкладка(таблица) ---------------------------------------------------------------
+        page_1 = QWidget()
+        page_1_layout = QVBoxLayout(page_1)
+
+        main_layout_1 = QVBoxLayout()
+        center_layout_1 = QHBoxLayout()
+
+        page_1_layout.addLayout(main_layout_1)
+        tabs.addTab(page_1, "Таблица")
 
         # --- Фильтры ---
         self.filter_group = QGroupBox("Фильтрация компаний")
@@ -56,9 +65,9 @@ class StockAnalyzerApp(QMainWindow):
         self.PE_group_button = QButtonGroup(self)
 
         self.PE_CB = QCheckBox("P/E фильтрация")
-        self.PE_low = QRadioButton("P/E ниже среднего")
+        self.PE_low = QRadioButton("P/E за последний год ниже среднего")
         self.PE_avg = QRadioButton("Все компании")
-        self.PE_high = QRadioButton("P/E выше среднего")
+        self.PE_high = QRadioButton("P/E за последний год выше среднего")
 
         self.PE_group_layout.addWidget(self.PE_CB)
         self.PE_filter_layout.addWidget(self.PE_low)
@@ -107,9 +116,9 @@ class StockAnalyzerApp(QMainWindow):
         self.ROE_group_button = QButtonGroup(self)
 
         self.ROE_CB = QCheckBox("ROE фильтрация")
-        self.ROE_low = QRadioButton("ROE ниже среднего")
+        self.ROE_low = QRadioButton("ROE за последний год ниже среднего")
         self.ROE_avg = QRadioButton("Все компании")
-        self.ROE_high = QRadioButton("ROE выше среднего")
+        self.ROE_high = QRadioButton("ROE  за последний год выше среднего")
 
         self.ROE_group_layout.addWidget(self.ROE_CB)
         self.ROE_filter_layout.addWidget(self.ROE_low)
@@ -126,17 +135,17 @@ class StockAnalyzerApp(QMainWindow):
 
         self.set_active_radio(self.ROE_CB, self.ROE_group_button)
 
-        main_layout.addWidget(self.filter_group)
+        main_layout_1.addWidget(self.filter_group)
 
         # --- Список эмитентов ---
         self.emitter_combo = QComboBox()
         self.emitter_combo.addItems(get_em_name(get_all_em_id()))
-        self.emitter_combo.currentTextChanged.connect(parse_data)
-        main_layout.addWidget(self.emitter_combo)
+        self.emitter_combo.currentTextChanged.connect(lambda: parse_data(self))
+        main_layout_1.addWidget(self.emitter_combo)
 
         # --- Таблица ---
         self.table = create_table_widget()
-        center_layout.addWidget(self.table)
+        center_layout_1.addWidget(self.table)
 
         # --- Блок информации об эмитенте ---
         self.emitter_group = QGroupBox("Информация об эмитенте")
@@ -158,13 +167,35 @@ class StockAnalyzerApp(QMainWindow):
         for i, lbl in enumerate(labels):
             self.emitter_layout.addWidget(lbl, i, 0, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        center_layout.addWidget(self.emitter_group, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        main_layout.addLayout(center_layout)
+        center_layout_1.addWidget(self.emitter_group, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        main_layout_1.addLayout(center_layout_1)
+
+        # ---------------------------------------------- Страница 2 - графики -------------------------------------------------------------------
+
+        page_2 = QWidget()
+        page_2_layout = QVBoxLayout(page_2)
+
+        main_layout_2 = QVBoxLayout()
+        center_layout_2 = QVBoxLayout()
+
+        page_2_layout.addLayout(main_layout_2)
+        tabs.addTab(page_2, "Графики")
+        self.tickers_combo = QComboBox()
+        self.tickers_combo.addItems(["SBER", "GAZP", "YDEX"])
+        self.tickers_combo.currentTextChanged.connect(self.change_ticker_combo)
+
+
+        self.graph = GraphWidget()
+        center_layout_2.addWidget(self.tickers_combo)
+        center_layout_2.addWidget(self.graph)
+
+        main_layout_2.addLayout(center_layout_2)
 
         # --- Инициализация ---
         self._last_good_state = None
         
         parse_data(self)
+        # self.graph.plot_price(get_last_hour_price(self.tickers_combo.currentText()))
 
 
     # ------------------------ ОБРАБОТЧИКИ UI -------------------
@@ -174,6 +205,9 @@ class StockAnalyzerApp(QMainWindow):
         self.debt_CB.setEnabled(not(self.PE_CB.isChecked()))
         self.ROE_CB.setEnabled(not(self.PE_CB.isChecked()))
         apply_PE_mode(self)
+
+    def change_ticker_combo(self):
+        self.graph.plot_price(get_last_hour_price(self.tickers_combo.currentText()))
 
     def change_debt(self):
         self.set_active_radio(self.debt_CB, self.debt_group_button)
