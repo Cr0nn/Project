@@ -231,7 +231,7 @@ def get_last_hour_price(ticker):
     return collection #Возвращает список из dict вида {'timestamp': datetime.datetime(2025, 11, 18, 19, 49, 29, 560000), 'price': 121.34}
 
 
-def PE_filter(Companies):
+def PE_filter(Companies, sector):
     collections1 = db["Companies"]
     collections2 = db["Finans_info"]
     none_check = lambda x: "0" if x is None else x.replace(" ", "") #Функция отлавливания значений None в таблице + замена пробелов в числах формата 1 689
@@ -302,82 +302,379 @@ def PE_filter(Companies):
         ]
 
         collection = list(collections2.aggregate(pipeline))[0]['PE']
-        filtred_pe = np.array([i['v'] for i in collection])
-        PE[i] = [round(average(filtred_pe),2), filtred_pe]
-        avg.append(round(average(filtred_pe),2))
-    return PE, average(avg)
+        filtred_pe = np.array([i['v'] for i in collection], dtype=np.float64)
+        if len(filtred_pe) >= 3:
+            PE[i] = filtred_pe[~np.isnan(filtred_pe)]
+    return PE, avg_metric(sector, "P/E")
 
-def debt_filter(Companies):
+def ROE_filter(Companies, sector):
     collections1 = db["Companies"]
     collections2 = db["Finans_info"]
-    none_check = lambda x: "0" if x is None else x.replace(" ", "") #Функция отлавливания значений None в таблице + замена пробелов в числах формата 1 689
-    debt_dict = {}
+    none_check = lambda x: "0" if x is None or x == "null" else x.replace(" ", "").replace("%", "") #Функция отлавливания значений None в таблице + замена пробелов в числах формата 1 689
+    ROE = {}
+    avg = []
     for i in Companies:
-        id = collections1.find_one({"name":i})["_id"]
-        sector = init_sector(i)
-        Company = collections2.find_one({id:{'$exists':True}})[id]
-        try:
-            if sector != "Банки":
-                debt = np.array([float(none_check(Company[j]["Долг, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                net_debt = np.array([float(none_check(Company[j]["Чистый долг, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                ebitda = np.array([float(none_check(Company[j]["EBITDA, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                equity = np.array([float(none_check(Company[j]["Чистые активы, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                capex = np.array([float(none_check(Company[j]["CAPEX, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                cash = np.array([float(none_check(Company[j]["Наличность, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                fcf = np.array([float(none_check(Company[j]["FCF, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                cap = np.array([float(none_check(Company[j]["Капитализация, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                perc_exp = np.array([float(none_check(Company[j]["Процентные расходы, млрд руб"])) for j in Company if j !="Период" and sector != "Финансовый сектор"])
-                capex_to_rev = np.array([float(none_check(Company[j]["CAPEX/Выручка, %"]).replace("%", "")) for j in Company if j!="Период" and sector != "Финансовый сектор"])
-                capex_to_rev = capex_to_rev/100
-                # Безопасное деление для revenue
-                revenue = np.divide(capex, capex_to_rev, 
-                                    out=np.zeros_like(capex, dtype=float), 
-                                    where=(capex_to_rev!=0) & ~np.isnan(capex_to_rev))
-                
-                # А теперь сами метрики
-                metrics = {
-                    "Debt/Equity": np.divide(debt, equity, out=np.zeros_like(debt, dtype=float), where=(equity!=0) & ~np.isnan(equity)),
-                    "NetDebt/EBITDA": np.divide(net_debt, ebitda, out=np.zeros_like(net_debt, dtype=float), where=(ebitda!=0) & ~np.isnan(ebitda)),
-                    "NetDebt/Revenue": np.divide(net_debt, revenue, out=np.zeros_like(net_debt, dtype=float), where=(revenue!=0) & ~np.isnan(revenue)),
-                    "Cash/Debt": np.divide(cash, debt, out=np.zeros_like(cash, dtype=float), where=(debt!=0) & ~np.isnan(debt)),
-                    "EBITDA/Interest": np.divide(ebitda, perc_exp, out=np.zeros_like(ebitda, dtype=float), where=(perc_exp!=0) & ~np.isnan(perc_exp)),
+        pipeline = [
+            {
+            "$lookup" : 
+                {
+                    "from" : "Companies",
+                    "localField" : "id",
+                    "foreignField" : "_id",
+                    "as" : "Company"
                 }
+            },
+            {
+                "$unwind" : "$Company"
+            },
+            {
+                "$match" : {"Company.name":i}
+            },
+            {
+                "$project" : 
+                    {
+                        "document_id" : "$_id",
+                        "info_array" : {"$objectToArray" : "$info"}
+                    }
+            },
+            {
+                "$project" : 
+                    {
+                        "document_id" : 1,
+                        "ROE_metric" : {
+                            "$map" : 
+                                {
+                                    "input" : 
+                                    {
+                                        "$filter": 
+                                            {
+                                                "input" : "$info_array",
+                                                "as" : "item",
+                                                "cond" : {"$ne" : ["$$item.k", "Период"]}
+                                            }
+                                    },
+                                    "as" : "year_data",
+                                    "in" : 
+                                        {
+                                            "k": "$$year_data.k",
+                                            "v": 
+                                            {
+                                                "ROE": 
+                                                    {"$toDouble" :
+                                                        {
+                                                                "$replaceAll" : 
+                                                                    {
+                                                                        "input" : 
+                                                                            {
+                                                                                "$replaceAll" : 
+                                                                                    {
+                                                                                        "input" : "$$year_data.v.ROE, %",
+                                                                                        "find" : " ",
+                                                                                        "replacement" : ''
+                                                                                    }
+                                                                            },
+                                                                        "find" : "%",
+                                                                        "replacement" : ""   
+                                                                    }
+                                                        }
+                                                    },
+                                                "ROE_alt":
+                                                    {
+                                                        "$toDouble": 
+                                                            {
+                                                                    "$replaceOne" : 
+                                                                        {
+                                                                            "input" : {
+                                                                                "$replaceAll" : 
+                                                                                    {
+                                                                                        "input" : "$$year_data.v.Рентабельность банка, %",
+                                                                                        "find" : " ",
+                                                                                        "replacement" : ""
+                                                                                    }
+                                                                                },
+                                                                            "find" : "%",
+                                                                            "replacement" : ""
+                                                                        }
+                                                            }
+                                                    },
+                                                "profit" : 
+                                                    {
+                                                        "$convert":
+                                                        {
+                                                            "input" : "$$year_data.v.Чистая прибыль, млрд руб",
+                                                            "to" : "double",
+                                                            "onError" : None,
+                                                            "onNull" : None
+                                                        }
+                                                    },
+                                                "equity" : 
+                                                    {
+                                                        "$convert" : 
+                                                            {
+                                                                "input" : "$$year_data.v.Чистые активы, млрд руб",
+                                                                "to" : "double",
+                                                                "onError" : None,
+                                                                "onNull" : None
+                                                            }
+                                                    }                                      
+                                            }
 
-                # Очистим от остатков NaN (если они всё же где-то просочились)
-                metrics = {k: np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0) for k, v in metrics.items()}
-                metrics = {k: np.round(v, 2) for k, v in metrics.items()}
-                debt_dict[i] = metrics
-            else:
-                credit = np.array([float(none_check(Company[j]["Кредитный портфель, млрд руб"])) 
-                    for j in Company if j != "Период"])
-                deposits = np.array([float(none_check(Company[j]["Депозиты, млрд руб"])) 
-                                    for j in Company if j != "Период"])
-                assets = np.array([float(none_check(Company[j]["Активы банка, млрд руб"])) 
-                                for j in Company if j != "Период"])
-                equity = np.array([float(none_check(Company[j]["Капитал, млрд руб"])) 
-                                for j in Company if j != "Период"])
-                profit = np.array([float(none_check(Company[j]["Чистая прибыль, млрд руб"])) 
-                                for j in Company if j != "Период"])
-
-                # --- Метрики ---
-                metrics = {
-                    "Loan/Deposit": np.divide(credit, deposits, out=np.zeros_like(credit), where=(deposits != 0) & ~np.isnan(deposits)),
-                    "Equity/Assets": np.divide(equity, assets, out=np.zeros_like(equity), where=(assets != 0) & ~np.isnan(assets)),
-                    "Loans/Assets": np.divide(credit, assets, out=np.zeros_like(credit), where=(assets != 0) & ~np.isnan(assets)),
-                    "Deposits/Assets": np.divide(deposits, assets, out=np.zeros_like(deposits), where=(assets != 0) & ~np.isnan(assets)),
-                    "Loans/Capital": np.divide(credit, equity, out=np.zeros_like(credit), where=(equity != 0) & ~np.isnan(equity)),
-                    "ROA": np.divide(profit, assets, out=np.zeros_like(profit), where=(assets != 0) & ~np.isnan(assets)),
-                    "ROE": np.divide(profit, equity, out=np.zeros_like(profit), where=(equity != 0) & ~np.isnan(equity)),
+                                        }
+                                },
+                                
+                        }
+                    }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "ROE_dict": {
+                        "$map": {
+                            "input": "$ROE_metric",
+                            "as": "year_item",
+                            "in": {
+                                "k": "$$year_item.k",
+                                "v": {
+                                    "$arrayToObject": {
+                                        "$filter": {
+                                            "input": {"$objectToArray": "$$year_item.v"},
+                                            "as": "field",
+                                            "cond": {"$ne": ["$$field.v", None]}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+        ]
+        collection = list(collections2.aggregate(pipeline))[0]["ROE_dict"]
+        keys = list(collection[0]["v"].keys())
+        if 'ROE' in keys:
+            arr = np.array([i["v"].get("ROE") for i in collection], dtype=np.float64)
+            if len(arr) >= 3:
+                ROE[i] = arr[~np.isnan(arr)]
+        elif "ROE_alt" in keys:
+            arr = np.array([i["v"].get("ROE_alt") for i in collection], dtype=np.float64)
+            if len(arr) >= 3:
+                ROE[i] = arr[~np.isnan(arr)]
+        elif "profit" in keys and "equity" in keys:
+            arr = (np.array([i["v"].get("profit") for i in collection], dtype=np.float64) / np.array([i["v"].get("equity") for i in collection], dtype=np.float64)) * 100
+            if len(arr) >= 3:
+                ROE[i] = arr[~np.isnan(arr)]
+    return ROE, avg_metric(sector, "ROE")
 
-                # Очистка NaN, ±∞
-                metrics = {k: np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0) for k, v in metrics.items()}
-                metrics = {k: np.round(v, 3) for k, v in metrics.items()}
 
-                debt_dict[i] = metrics
-        except Exception as e:
-            print(e)
-    return debt_dict
+def debt_filter(Companies, sector):
+    collections1 = db["Companies"]
+    collections2 = db["Finans_info"]
+    DEBT = {}
+    for i in Companies:
+        pipeline = [
+            {
+                "$lookup" : 
+                    {
+                        "from" : "Companies",
+                        "localField" : "id",
+                        "foreignField" : "_id",
+                        "as" : "Company"
+                    }
+            },
+            {
+                "$unwind" : "$Company"
+            },
+            {
+                "$match" : {"Company.name" : i}
+            },
+            {
+                "$project" : 
+                    {
+                        "_id" : 0,
+                        "info_array" : {"$objectToArray" : "$info"}
+                    }
+            },
+            build_debtmetric_project(sector),
+            {
+                "$project": 
+                    {
+                        "_id" : 0,
+                        "Debt_dict" : 
+                            {
+                                "$map" : 
+                                    {
+                                        "input" : "$Debt_metric",
+                                        "as" : "year_item",
+                                        "in" : 
+                                            {
+                                                "k" : "$$year_item.k",
+                                                "v" : 
+                                                    {
+                                                        "$arrayToObject" : 
+                                                            {
+                                                                "$filter" : 
+                                                                    {
+                                                                        "input" : {
+                                                                            "$map" : 
+                                                                            {
+                                                                                "input" : {"$objectToArray" : "$$year_item.v"},
+                                                                                "as" : "field",
+                                                                                "in" : {
+                                                                                    "k" : "$$field.k",
+                                                                                    "v" : {
+                                                                                        "$toDouble" : 
+                                                                                            {
+                                                                                                "$replaceAll" : 
+                                                                                                    {
+                                                                                                        "input" : 
+                                                                                                            {
+                                                                                                                "$replaceAll" : 
+                                                                                                                    {
+                                                                                                                        "input" : "$$field.v",
+                                                                                                                        "find" : "%",
+                                                                                                                        "replacement" : " "
+                                                                                                                    }
+                                                                                                            },
+                                                                                                        "find" : " ",
+                                                                                                        "replacement" : ""
+                                                                                                    }
+                                                                                            }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        },
+                                                                        "as" : "field",
+                                                                        "cond" : {"$ne" : ["$$field.v", None]}
+                                                                    }
+                                                            }
+                                                    }
+                                            }
+                                    }
+                            }
+                    }
+            }
+        ]
+        collection = list(collections2.aggregate(pipeline))[0]["Debt_dict"]
+        if sector != "Банки":
+            debt = np.array([k["v"].get('debt') for k in collection], dtype=np.float64)
+            equity = np.array([k["v"].get('equity') for k in collection], dtype=np.float64)
+            net_debt = np.array([k["v"].get('net_debt') for k in collection], dtype=np.float64)
+            ebitda = np.array([k["v"].get('ebitda') for k in collection], dtype=np.float64)
+            capex = np.array([k["v"].get('capex') for k in collection], dtype=np.float64)
+            cash = np.array([k["v"].get('cash') for k in collection], dtype=np.float64)
+            fcf = np.array([k["v"].get('fcf') for k in collection], dtype=np.float64)
+            cap = np.array([k["v"].get('cap') for k in collection], dtype=np.float64)
+            perc_exp = np.array([k["v"].get('perc_exp') for k in collection], dtype=np.float64)
+            capex_to_rev = (np.array([k["v"].get('capex_to_rev') for k in collection], dtype=np.float64))/100
+            revenue = np.divide(capex, capex_to_rev, 
+                                out=np.zeros_like(capex, dtype=float), 
+                                where=(capex_to_rev!=0) & ~np.isnan(capex_to_rev))
+            metrics = {
+                "Debt/Equity": np.divide(debt, equity, out=np.zeros_like(debt, dtype=float), where=(equity!=0) & ~np.isnan(equity)),
+                "NetDebt/EBITDA": np.divide(net_debt, ebitda, out=np.zeros_like(net_debt, dtype=float), where=(ebitda!=0) & ~np.isnan(ebitda)),
+                "NetDebt/Revenue": np.divide(net_debt, revenue, out=np.zeros_like(net_debt, dtype=float), where=(revenue!=0) & ~np.isnan(revenue)),
+                "Cash/Debt": np.divide(cash, debt, out=np.zeros_like(cash, dtype=float), where=(debt!=0) & ~np.isnan(debt)),
+                "EBITDA/Interest": np.divide(ebitda, perc_exp, out=np.zeros_like(ebitda, dtype=float), where=(perc_exp!=0) & ~np.isnan(perc_exp)),
+            }
+        else:
+            credit = np.array([k["v"].get('credit') for k in collection], dtype=np.float64)
+            deposits = np.array([k["v"].get('deposits') for k in collection], dtype=np.float64)
+            assets = np.array([k["v"].get('assets') for k in collection], dtype=np.float64)
+            equity = np.array([k["v"].get('equity') for k in collection], dtype=np.float64)
+            profit = np.array([k["v"].get('profit') for k in collection], dtype=np.float64)
+            metrics = {
+                "Loan/Deposit": np.divide(credit, deposits, out=np.zeros_like(credit), where=(deposits != 0) & ~np.isnan(deposits)),
+                "Equity/Assets": np.divide(equity, assets, out=np.zeros_like(equity), where=(assets != 0) & ~np.isnan(assets)),
+                "Loans/Assets": np.divide(credit, assets, out=np.zeros_like(credit), where=(assets != 0) & ~np.isnan(assets)),
+                "Deposits/Assets": np.divide(deposits, assets, out=np.zeros_like(deposits), where=(assets != 0) & ~np.isnan(assets)),
+                "Loans/Capital": np.divide(credit, equity, out=np.zeros_like(credit), where=(equity != 0) & ~np.isnan(equity)),
+                "ROA": np.divide(profit, assets, out=np.zeros_like(profit), where=(assets != 0) & ~np.isnan(assets)),
+                "ROE": np.divide(profit, equity, out=np.zeros_like(profit), where=(equity != 0) & ~np.isnan(equity)),
+            }
+        metrics = {k: np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0) for k, v in metrics.items()}
+        metrics = {k: np.round(v, 2) for k, v in metrics.items()} 
+        DEBT[i] = metrics
+    return DEBT
+
+def build_debtmetric_project(sector):
+    if sector != "Банки":
+        return {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "Debt_metric" :
+                        {
+                            "$map":
+                            {
+                                "input" : 
+                                    {
+                                        "$filter" : 
+                                            {
+                                                "input" : "$info_array",
+                                                "as" : "item",
+                                                "cond" : {"$ne" : ["$$item.k", "Период"]}
+                                            }
+                                    },
+                                    "as" : "year_data",
+                                    "in" : 
+                                        {
+                                            "k" : "$$year_data.k",
+                                            "v" : 
+                                                {
+                                                    "debt" : "$$year_data.v.Долг, млрд руб",
+                                                    "net_debt" : "$$year_data.v.Чистый долг, млрд руб",
+                                                    "ebitda" : "$$year_data.v.EBITDA, млрд руб",
+                                                    "equity" : "$$year_data.v.Чистые активы, млрд руб",
+                                                    "capex" : "$$year_data.v.CAPEX, млрд руб",
+                                                    "capex_to_rev" : "$$year_data.v.CAPEX/Выручка, %",
+                                                    "cash" : "$$year_data.v.Наличность, млрд руб",
+                                                    "fcf" : "$$year_data.v.FCF, млрд руб",
+                                                    "cap" : "$$year_data.v.Капитализация, млрд руб",
+                                                    "perc_exp" : "$$year_data.v.Процентные расходы, млрд руб"
+
+                                                }
+                                        }
+                            }
+                        }
+                }
+            }
+    else:
+                return {
+            "$project" : 
+                {
+                    "_id" : 0,
+                    "Debt_metric" :
+                        {
+                            "$map":
+                            {
+                                "input" : 
+                                    {
+                                        "$filter" : 
+                                            {
+                                                "input" : "$info_array",
+                                                "as" : "item",
+                                                "cond" : {"$ne" : ["$$item.k", "Период"]}
+                                            }
+                                    },
+                                    "as" : "year_data",
+                                    "in" : 
+                                        {
+                                            "k" : "$$year_data.k",
+                                            "v" : 
+                                                {
+                                                    "credit" : "$$year_data.v.Кредитный портфель, млрд руб",
+                                                    "deposits" : "$$year_data.v.Депозиты, млрд руб",
+                                                    "assets" : "$$year_data.v.Активы банка, млрд руб",
+                                                    "equity" : "$$year_data.v.Капитал, млрд руб",
+                                                    "profit" : "$$year_data.v.Чистая прибыль, млрд руб",
+                                                }
+                                        }
+                            }
+                        }
+                }
+            }
+
+
 def div_filter(Companies):
     collections1 = db["Companies"]
     collections2 = db["Finans_info"]
@@ -460,161 +757,11 @@ def div_filter(Companies):
             Filtred.append(i)
     return Filtred
 
-def ROE_filter(Companies, sector):
-    collections1 = db["Companies"]
-    collections2 = db["Finans_info"]
-    none_check = lambda x: "0" if x is None or x == "null" else x.replace(" ", "").replace("%", "") #Функция отлавливания значений None в таблице + замена пробелов в числах формата 1 689
-    ROE = {}
-    avg = []
-    for i in Companies:
-        pipeline = [
-            {
-            "$lookup" : 
-                {
-                    "from" : "Companies",
-                    "localField" : "id",
-                    "foreignField" : "_id",
-                    "as" : "Company"
-                }
-            },
-            {
-                "$unwind" : "$Company"
-            },
-            {
-                "$match" : {"Company.name":i}
-            },
-            {
-                "$project" : 
-                    {
-                        "document_id" : "$_id",
-                        "info_array" : {"$objectToArray" : "$info"}
-                    }
-            },
-            {
-                "$project" : 
-                    {
-                        "document_id" : 1,
-                        "ROE_metric" : {
-                            "$map" : 
-                                {
-                                    "input" : 
-                                    {
-                                        "$filter": 
-                                            {
-                                                "input" : "$info_array",
-                                                "as" : "item",
-                                                "cond" : {"$ne" : ["$$item.k", "Период"]}
-                                            }
-                                    },
-                                    "as" : "year_data",
-                                    "in" : 
-                                        {
-                                            "k": "$$year_data.k",
-                                            "v": 
-                                            {
-                                                "ROE": 
-                                                    {"$convert" :
-                                                        {
-                                                            "input" : 
-                                                            {
-                                                                "$replaceOne" : 
-                                                                    {
-                                                                        "input" : "$$year_data.v.ROE, %",
-                                                                        "find" : "%",
-                                                                        "replacement" : ""   
-                                                                    },
-                                                            },
-                                                            "to" : "double",
-                                                            "onError" : None,
-                                                            "onNull" : None
-                                                        }
-                                                    },
-                                                "ROE_alt":
-                                                    {
-                                                        "$convert": 
-                                                            {
-                                                                "input" : 
-                                                                {
-                                                                    "$replaceOne" : 
-                                                                        {
-                                                                            "input" : "$$year_data.v.Рентабельность банка, %",
-                                                                            "find" : "%",
-                                                                            "replacement" : ""
-                                                                        }
-                                                                },
-                                                                "to" : "double",
-                                                                "onError" : None,
-                                                                "onNull" : None
-                                                            }
-                                                    },
-                                                "profit" : 
-                                                    {
-                                                        "$convert":
-                                                        {
-                                                            "input" : "$$year_data.v.Чистая прибыль, млрд руб",
-                                                            "to" : "double",
-                                                            "onError" : None,
-                                                            "onNull" : None
-                                                        }
-                                                    },
-                                                "equity" : 
-                                                    {
-                                                        "$convert" : 
-                                                            {
-                                                                "input" : "$$year_data.v.Чистые активы, млрд руб",
-                                                                "to" : "double",
-                                                                "onError" : None,
-                                                                "onNull" : None
-                                                            }
-                                                    }                                      
-                                            }
-
-                                        }
-                                },
-                                
-                        }
-                    }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "ROE_dict": {
-                        "$map": {
-                            "input": "$ROE_metric",
-                            "as": "year_item",
-                            "in": {
-                                "k": "$$year_item.k",
-                                "v": {
-                                    "$arrayToObject": {
-                                        "$filter": {
-                                            "input": {"$objectToArray": "$$year_item.v"},
-                                            "as": "field",
-                                            "cond": {"$ne": ["$$field.v", None]}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        ]
-        collection = list(collections2.aggregate(pipeline))[0]["ROE_dict"]
-        keys = list(collection[0]["v"].keys())
-        if 'ROE' in keys:
-            ROE[i] = np.array([i["v"].get("ROE") for i in collection])
-        elif "ROE_alt" in keys:
-            ROE[i] = np.array([i["v"].get("ROE_alt") for i in collection])
-        elif "profit" in keys and "equity" in keys:
-            ROE[i] = (np.array([i["v"].get("profit") for i in collection]) / np.array([i["v"].get("equity") for i in collection])) * 100
-    return ROE, np.median(avg_metric(sector)[0]["values"])
-
-
 def init_sector(Company):
     collections1 = db["Companies"]
     return collections1.find_one({'name':Company})['sector']
 
-def avg_metric(sector):
+def avg_metric(sector, metric):
     collection1 = db["Companies"]           
     collection2 = db["Finans_info"]
     pipeline = [
@@ -668,19 +815,7 @@ def avg_metric(sector):
                         }
                 }
         },
-        {
-            "$project" : 
-                {
-                    "_id" : 0,
-                    "rawValue" : 
-                        {
-                            "$ifNull" : [
-                                "$last.v.ROE, %",
-                                "$last.v.Рентабельность банка, %"
-                            ]
-                        }
-                }
-        },
+        build_rawvalue_project(metric),
         {
             "$project" : 
                 {
@@ -727,7 +862,30 @@ def avg_metric(sector):
         }
 
     ]
-    return list(collection2.aggregate(pipeline))
+    print(list(collection2.aggregate(pipeline)))
+    return np.median(list(collection2.aggregate(pipeline))[0]["values"])
+
+def build_rawvalue_project(metric):
+    if metric == "ROE":
+        return {
+            "$project": {
+                "_id": 0,
+                "rawValue": {
+                    "$ifNull": [
+                        "$last.v.ROE, %",
+                        "$last.v.Рентабельность банка, %"
+                    ]
+                }
+            }
+        }
+    else:
+        return {
+            "$project": {
+                "_id": 0,
+                "rawValue": f"$last.v.{metric}"
+            }
+        }
+
 
 
 
