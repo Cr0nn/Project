@@ -1,6 +1,6 @@
 #Файл с основной логикой фильтрации
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
-from numpy import average, median
+import numpy as np
 from db.MongoDB_handler import (
     find_info, get_all_em_id, get_em_name, find_id_by_name, get_base_info,
     get_companies_in_sector, div_filter, PE_filter, debt_filter, ROE_filter
@@ -24,12 +24,13 @@ def get_filtered_companies(window):
 def parse_data(window, name=None):
     "Информация о текущей компании из списка"
     if name is None:
+
         name = window.emitter_combo.currentText()
     id = find_id_by_name(name)
     docs = find_info(id)
     base_info = get_base_info(id)
     for i in docs:
-        data = i[id]
+        data = i["info"]
     if "Период" in data:
         del data["Период"]
 
@@ -53,7 +54,7 @@ def apply_filters(window):
     window.emitter_combo.blockSignals(False)
     window.emitter_combo.setEnabled(True)
 
-    parse_data(window,result[0])
+    parse_data(window, result[0])
     window.save_state()
     return result
 
@@ -70,7 +71,7 @@ def apply_PE_mode(window):
         QTimer.singleShot(0, window.handle_no_results)
         return
 
-    PE_data, avg = PE_filter(companies)
+    PE_data, avg = PE_filter(companies, window.filter_box.currentText())
     if not PE_data:
         QTimer.singleShot(0, window.handle_no_results)
         return
@@ -78,23 +79,23 @@ def apply_PE_mode(window):
     RB = window.get_active_rb(window.PE_group_button)
     if RB is window.PE_high:
         data = {
-            "Компания": [k for k, v in PE_data.items() if v[0] > avg],
-            "Среднее P/E за 4 года": [v[0] for k, v in PE_data.items() if v[0] > avg],
-            "Среднее P/E за последний год": [v[1] for k, v in PE_data.items() if v[0] > avg],
+            "Компания": [k for k, v in PE_data.items() if v[-1] >= avg],
+            "Среднее P/E за 4 года": [np.median(v) for k, v in PE_data.items() if v[-1] >= avg],
+            "P/E за последний год": [v[-1] for k, v in PE_data.items() if v[-1] >= avg],
         }
     elif RB is window.PE_low:
         data = {
-            "Компания": [k for k, v in PE_data.items() if v[0] < avg],
-            "Среднее P/E за 4 года": [v[0] for k, v in PE_data.items() if v[0] < avg],
-            "Среднее P/E за последний год": [v[1] for k, v in PE_data.items() if v[0] < avg],
+            "Компания": [k for k, v in PE_data.items() if v[-1] < avg],
+            "Среднее P/E за 4 года": [np.median(v) for k, v in PE_data.items() if v[-1] < avg],
+            "P/E за последний год": [v[-1] for k, v in PE_data.items() if v[-1] < avg],
         }
     else:
         data = {
             "Компания": list(PE_data.keys()),
-            "Среднее P/E за 4 года": [v[0] for v in PE_data.values()],
-            "Среднее P/E за последний год": [v[1] for v in PE_data.values()],
+            "Среднее P/E за 4 года": [np.median(v) for v in PE_data.values()],
+            "P/E за последний год": [v[-1] for v in PE_data.values()],
         }
-
+    print(data)
     update_table_data(window.table, get_sample_data(data))
     window.emitter_combo.setEnabled(False)
     window.save_state()
@@ -112,25 +113,28 @@ def apply_debt_mode(window):
         QTimer.singleShot(0, window.handle_no_results)
         return
     
-    debt_data = debt_filter(companies)
+    debt_data = debt_filter(companies, window.filter_box.currentText())
     if not debt_data:
         QTimer.singleShot(0, window.handle_no_results)
         return
 
     RB = window.get_active_rb(window.debt_group_button)
-    keys = list((list(debt_data.values())[0]).keys())
+    for k,v in debt_data.items():
+        keys = list(v.keys())
+        break
     if RB is window.debt_avg:
         data = {
             "Компания": list(debt_data.keys()),
         }
         for i in keys:
-            data[i] = [round(average(v[i]),2) for k,v in debt_data.items()]
+            data[i] = [round(np.average(v[i]),2) for k, v in debt_data.items()]
     else:
         data = {
             "Компания": list(debt_data.keys()),
         }
         for i in keys:
-            data[i] = [v[i][-1] for k,v in debt_data.items()]
+            data[i] = [v[i][-1] for k, v in debt_data.items()]
+
     update_table_data(window.table, get_sample_data(data))
     window.emitter_combo.setEnabled(False)
     window.save_state()
@@ -147,31 +151,31 @@ def apply_ROE_mode(window):
         QTimer.singleShot(0, window.handle_no_results)
         return
 
-    ROE_data, avg = ROE_filter(companies)
+    ROE_data, avg = ROE_filter(companies, window.filter_box.currentText())
     if not ROE_data:
         QTimer.singleShot(0, window.handle_no_results)
         return
 
     RB = window.get_active_rb(window.ROE_group_button)
+    print(ROE_data)
     if RB is window.ROE_high:
         data = {
-            "Компания": [k for k, v in ROE_data.items() if v[0] > avg],
-            "Среднее P/E за 4 года": [v[0] for k, v in ROE_data.items() if v[0] > avg],
-            "Среднее P/E за последний год": [v[1] for k, v in ROE_data.items() if v[0] > avg],
+            "Компания": [k for k, v in ROE_data.items() if v[-1] >= avg],
+            "Среднее P/E за 4 года": [np.median(v) for k, v in ROE_data.items() if v[-1] >= avg],
+            "Среднее P/E за последний год": [v[-1] for k, v in ROE_data.items() if v[-1] >= avg],
         }
     elif RB is window.ROE_low:
         data = {
-            "Компания": [k for k, v in ROE_data.items() if v[0] < avg],
-            "Среднее P/E за 4 года": [v[0] for k, v in ROE_data.items() if v[0] < avg],
-            "Среднее P/E за последний год": [v[1] for k, v in ROE_data.items() if v[0] < avg],
+            "Компания": [k for k, v in ROE_data.items() if v[-1] < avg],
+            "Среднее P/E за 4 года": [np.median(v) for k, v in ROE_data.items() if v[-1] < avg],
+            "Среднее P/E за последний год": [v[-1] for k, v in ROE_data.items() if v[-1] < avg],
         }
     else:
         data = {
             "Компания": list(ROE_data.keys()),
-            "Среднее P/E за 4 года": [v[0] for v in ROE_data.values()],
-            "Среднее P/E за последний год": [v[1] for v in ROE_data.values()],
+            "Среднее P/E за 4 года": [np.median(v) for v in ROE_data.values()],
+            "Среднее P/E за последний год": [v[-1] for v in ROE_data.values()],
         }
-
     update_table_data(window.table, get_sample_data(data))
     window.emitter_combo.setEnabled(False)
     window.save_state()
