@@ -7,6 +7,8 @@ def create_table_widget():
     table.setRowCount(0)
     table.setColumnCount(0)
 
+    table.setEditTriggers(QTableWidget.NoEditTriggers)
+
 
     return table
 
