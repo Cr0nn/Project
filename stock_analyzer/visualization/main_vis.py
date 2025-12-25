@@ -1,30 +1,39 @@
 #Основной файл визуализации
 import sys
-from numpy import average
+import threading
+import numpy as np
+from config_folder.config import TICKERS, APITOKEN
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget, QLabel, QComboBox,
     QGroupBox, QGridLayout, QHBoxLayout, QCheckBox, QMessageBox,
-    QRadioButton, QButtonGroup, QTableWidget, QTabWidget
+    QRadioButton, QButtonGroup, QTableWidget, QTabWidget, QSizePolicy
 )
 from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from visualization.table_widget import create_table_widget, update_table_data
 from db.MongoDB_handler import (
     find_info, get_all_em_id, get_em_name, find_id_by_name, get_base_info,
     get_companies_in_sector, div_filter, PE_filter, debt_filter, ROE_filter,
-    get_last_hour_price
+    get_last_hour_price, get_all_tickers, ticker_to_name
 )
 from data.filter import (
     apply_filters, apply_PE_mode, apply_debt_mode, apply_ROE_mode, 
     parse_data
 )
-from visualization.graph import GraphWidget
+from visualization.graph import MultiPanelGraphWidget, PriceGraphWidget
 from utils.helpers import get_all_empty_sectors
 from visualization.data_loader import get_sample_data
 from visualization.em_layout import update_base_info
+from PySide6.QtWidgets import QStatusBar, QTextEdit
+from scrapers.parser_thread import ParserThread
+from scrapers.Tinkoff_scraper import ParserSignals
+
+
 
 class StockAnalyzerApp(QMainWindow):
     def __init__(self):
         super().__init__()
+
+
         self.setWindowTitle("Stock Analyzer")
         self.setGeometry(100, 100, 1000, 800)
 
@@ -181,21 +190,66 @@ class StockAnalyzerApp(QMainWindow):
         page_2_layout.addLayout(main_layout_2)
         tabs.addTab(page_2, "Графики")
         self.tickers_combo = QComboBox()
-        self.tickers_combo.addItems(["SBER", "GAZP", "YDEX"])
+        self.tickers_combo.addItems(ticker_to_name())
         self.tickers_combo.currentTextChanged.connect(self.change_ticker_combo)
 
 
-        self.graph = GraphWidget()
+        self.price_graph = PriceGraphWidget()
+        self.ta_graph = MultiPanelGraphWidget()
         center_layout_2.addWidget(self.tickers_combo)
-        center_layout_2.addWidget(self.graph)
+        center_layout_2.addWidget(self.ta_graph)
 
         main_layout_2.addLayout(center_layout_2)
 
+        # --- Таймер обновления графика ---
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(10000)
+        self.update_timer.timeout.connect(self.update_chart)
+
+
+        # --- Окно для лога парсера ---        
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(120)
+
+        page_1_layout.addWidget(self.log)
+
+        self.log.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Fixed
+        )
+        self.log.setMaximumHeight(80)
+        
+
         # --- Инициализация ---
         self._last_good_state = None
-        
+
         parse_data(self)
-        # self.graph.plot_price(get_last_hour_price(self.tickers_combo.currentText()))
+        data = get_last_hour_price(self.tickers_combo.currentText())
+        self.price_graph.plot_price(data)
+        prices = np.array([i["price"] for i in data])
+
+        self.ta_graph.update_all(data)
+        self.ta_graph.redraw()
+        self.update_timer.start()
+
+
+        self.parser_signals = ParserSignals()
+        self.parser_signals.status.connect(self.status_bar.showMessage)
+        self.parser_signals.status.connect(self.log.append)
+        self.parser_signals.error.connect(
+            lambda e: QMessageBox.critical(self, "Ошибка парсера", e)
+        )
+
+        self.parser_thread = ParserThread(
+            APITOKEN,
+            get_all_tickers(),
+            self.parser_signals
+        )
+        self.parser_thread.start()
 
 
     # ------------------------ ОБРАБОТЧИКИ UI -------------------
@@ -207,7 +261,14 @@ class StockAnalyzerApp(QMainWindow):
         apply_PE_mode(self)
 
     def change_ticker_combo(self):
-        self.graph.plot_price(get_last_hour_price(self.tickers_combo.currentText()))
+        data = get_last_hour_price(self.tickers_combo.currentText())
+        self.price_graph.plot_price(data)
+        prices = np.array([i["price"] for i in data])
+
+        self.ta_graph.update_all(data)
+        self.ta_graph.redraw()
+        self.update_timer.start()
+
 
     def change_debt(self):
         self.set_active_radio(self.debt_CB, self.debt_group_button)
@@ -349,6 +410,20 @@ class StockAnalyzerApp(QMainWindow):
         self.restore_state()
         QMessageBox.warning(self, "Предупреждение", "Не найдено ни одной компании с заданными фильтрами")
 
+    def update_chart(self):
+        ticker = self.tickers_combo.currentText()  # выбранный в UI тикер
+        if not ticker:
+            return
+
+        data = get_last_hour_price(ticker)
+
+        if not data:
+            return
+
+        MultiPanelGraphWidget.update_all(self.ta_graph,data)
+
+
+
 # -------------------------- START -------------------------------
 
 def start():
@@ -356,4 +431,3 @@ def start():
     window = StockAnalyzerApp()
     window.show()
     sys.exit(app.exec())
-
