@@ -1,0 +1,13 @@
+from PySide6.QtCore import QThread
+import asyncio
+from scrapers.Tinkoff_scraper import main
+
+class ParserThread(QThread):
+    def __init__(self, token, tickers, signals):
+        super().__init__()
+        self.token = token
+        self.tickers = tickers
+        self.signals = signals
+
+    def run(self):
+        asyncio.run(main(self.token, self.tickers, self.signals))
