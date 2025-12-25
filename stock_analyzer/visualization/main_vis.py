@@ -1,433 +1,442 @@
-#Основной файл визуализации
-import sys
-import threading
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import datetime
+import matplotlib.dates as mdates
 import numpy as np
-from config_folder.config import TICKERS, APITOKEN
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QVBoxLayout, QWidget, QLabel, QComboBox,
-    QGroupBox, QGridLayout, QHBoxLayout, QCheckBox, QMessageBox,
-    QRadioButton, QButtonGroup, QTableWidget, QTabWidget, QSizePolicy
-)
-from PySide6.QtCore import Qt, QSignalBlocker, QTimer
-from visualization.table_widget import create_table_widget, update_table_data
-from db.MongoDB_handler import (
-    find_info, get_all_em_id, get_em_name, find_id_by_name, get_base_info,
-    get_companies_in_sector, div_filter, PE_filter, debt_filter, ROE_filter,
-    get_last_hour_price, get_all_tickers, ticker_to_name
-)
-from data.filter import (
-    apply_filters, apply_PE_mode, apply_debt_mode, apply_ROE_mode, 
-    parse_data
-)
-from visualization.graph import MultiPanelGraphWidget, PriceGraphWidget
-from utils.helpers import get_all_empty_sectors
-from visualization.data_loader import get_sample_data
-from visualization.em_layout import update_base_info
-from PySide6.QtWidgets import QStatusBar, QTextEdit
-from scrapers.parser_thread import ParserThread
-from scrapers.Tinkoff_scraper import ParserSignals
 
 
+class BaseGraphWidget(QWidget):
 
-class StockAnalyzerApp(QMainWindow):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
 
-
-        self.setWindowTitle("Stock Analyzer")
-        self.setGeometry(100, 100, 1000, 800)
-
-        tabs = QTabWidget()
-        self.setCentralWidget(tabs)
-
-        #------------------------------------- Первая вкладка(таблица) ---------------------------------------------------------------
-        page_1 = QWidget()
-        page_1_layout = QVBoxLayout(page_1)
-
-        main_layout_1 = QVBoxLayout()
-        center_layout_1 = QHBoxLayout()
-
-        page_1_layout.addLayout(main_layout_1)
-        tabs.addTab(page_1, "Таблица")
-
-        # --- Фильтры ---
-        self.filter_group = QGroupBox("Фильтрация компаний")
-        self.filter_layout = QGridLayout(self.filter_group)
-
-        # Сектор
-        self.filter_box = QComboBox()
-        self.filter_box.addItems(get_all_empty_sectors())
-        self.filter_box.model().sort(0)
-        self.filter_box.setCurrentText("Все секторы")
-        self.filter_box.currentTextChanged.connect(self.set_sector)
-        self.filter_layout.addWidget(self.filter_box)
-
-        # Чекбокс: дивиденды
-        self.div_check = QCheckBox("Платят дивиденды")
-        self.div_check.stateChanged.connect(self.change_divCB)
-        self.filter_layout.addWidget(self.div_check)
-
-        # --- Группа PE ---
-        self.PE_group_box = QGroupBox("P/E фильтрация")
-        self.PE_group_layout = QVBoxLayout(self.PE_group_box)
-        self.PE_filter_layout = QHBoxLayout(self.PE_group_box)
-        self.PE_group_button = QButtonGroup(self)
-
-        self.PE_CB = QCheckBox("P/E фильтрация")
-        self.PE_low = QRadioButton("P/E за последний год ниже среднего")
-        self.PE_avg = QRadioButton("Все компании")
-        self.PE_high = QRadioButton("P/E за последний год выше среднего")
-
-        self.PE_group_layout.addWidget(self.PE_CB)
-        self.PE_filter_layout.addWidget(self.PE_low)
-        self.PE_filter_layout.addWidget(self.PE_avg)
-        self.PE_filter_layout.addWidget(self.PE_high)
-        self.PE_group_layout.addLayout(self.PE_filter_layout)
-
-        for btn in (self.PE_low, self.PE_avg, self.PE_high):
-            self.PE_group_button.addButton(btn)
-
-        self.PE_group_button.buttonClicked.connect(self.on_radio_changed)
-        self.PE_CB.stateChanged.connect(self.change_PECB)
-        self.filter_layout.addWidget(self.PE_group_box)
-
-        self.set_active_radio(self.PE_CB, self.PE_group_button)
-
-        # --- Долговая нагрузка фильтр
-        self.debt_group_box = QGroupBox("Долговая нагрузка фильтрация")
-        self.debt_group_layout = QVBoxLayout(self.debt_group_box)
-        self.debt_filter_layout = QHBoxLayout(self.debt_group_box)
-        self.debt_group_button = QButtonGroup(self)
-
-        self.debt_CB = QCheckBox("Долговая нагрузка")
-        self.debt_last = QRadioButton("Последний год")
-        self.debt_avg = QRadioButton("Среднее за 4 года")
-
-        self.debt_group_layout.addWidget(self.debt_CB)
-        self.debt_filter_layout.addWidget(self.debt_last)
-        self.debt_filter_layout.addWidget(self.debt_avg)
-        self.debt_group_layout.addLayout(self.debt_filter_layout)
-
-        for btn in (self.debt_avg, self.debt_last):
-            self.debt_group_button.addButton(btn)
-
-        self.debt_group_button.buttonClicked.connect(self.on_radio_changed)
-        self.debt_CB.stateChanged.connect(self.change_debt)
-        self.filter_layout.addWidget(self.debt_group_box)
-
-        self.set_active_radio(self.debt_CB, self.debt_group_button)
-
-
-        # --- ROE фильтр
-        self.ROE_group_box = QGroupBox("ROE фильтр")
-        self.ROE_group_layout = QVBoxLayout(self.ROE_group_box)
-        self.ROE_filter_layout = QHBoxLayout(self.ROE_group_box)
-        self.ROE_group_button = QButtonGroup(self)
-
-        self.ROE_CB = QCheckBox("ROE фильтрация")
-        self.ROE_low = QRadioButton("ROE за последний год ниже среднего")
-        self.ROE_avg = QRadioButton("Все компании")
-        self.ROE_high = QRadioButton("ROE  за последний год выше среднего")
-
-        self.ROE_group_layout.addWidget(self.ROE_CB)
-        self.ROE_filter_layout.addWidget(self.ROE_low)
-        self.ROE_filter_layout.addWidget(self.ROE_avg)
-        self.ROE_filter_layout.addWidget(self.ROE_high)
-        self.ROE_group_layout.addLayout(self.ROE_filter_layout)
-        
-        for btn in (self.ROE_high, self.ROE_avg, self.ROE_low):
-            self.ROE_group_button.addButton(btn)
-
-        self.ROE_group_button.buttonClicked.connect(self.on_radio_changed)
-        self.ROE_CB.stateChanged.connect(self.change_ROECB)
-        self.filter_layout.addWidget(self.ROE_group_box)
-
-        self.set_active_radio(self.ROE_CB, self.ROE_group_button)
-
-        main_layout_1.addWidget(self.filter_group)
-
-        # --- Список эмитентов ---
-        self.emitter_combo = QComboBox()
-        self.emitter_combo.addItems(get_em_name(get_all_em_id()))
-        self.emitter_combo.currentTextChanged.connect(lambda: parse_data(self))
-        main_layout_1.addWidget(self.emitter_combo)
-
-        # --- Таблица ---
-        self.table = create_table_widget()
-        center_layout_1.addWidget(self.table)
-
-        # --- Блок информации об эмитенте ---
-        self.emitter_group = QGroupBox("Информация об эмитенте")
-        self.emitter_group.setMaximumHeight(150)
-        self.emitter_group.setFixedWidth(450)
-        self.emitter_layout = QGridLayout(self.emitter_group)
-
-        self.emitter_name_label = QLabel("Название: Не указано")
-        self.emitter_id_label = QLabel("ID: Не указано")
-        self.emitter_sector_label = QLabel("Сектор: Не указано")
-        self.emitter_inn_label = QLabel("ИНН: Не указано")
-        self.emitter_okpo_label = QLabel("ОКПО: Не указано")
-
-        labels = [
-            self.emitter_name_label, self.emitter_id_label,
-            self.emitter_sector_label, self.emitter_inn_label,
-            self.emitter_okpo_label
-        ]
-        for i, lbl in enumerate(labels):
-            self.emitter_layout.addWidget(lbl, i, 0, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        center_layout_1.addWidget(self.emitter_group, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        main_layout_1.addLayout(center_layout_1)
-
-        # ---------------------------------------------- Страница 2 - графики -------------------------------------------------------------------
-
-        page_2 = QWidget()
-        page_2_layout = QVBoxLayout(page_2)
-
-        main_layout_2 = QVBoxLayout()
-        center_layout_2 = QVBoxLayout()
-
-        page_2_layout.addLayout(main_layout_2)
-        tabs.addTab(page_2, "Графики")
-        self.tickers_combo = QComboBox()
-        self.tickers_combo.addItems(ticker_to_name())
-        self.tickers_combo.currentTextChanged.connect(self.change_ticker_combo)
-
-
-        self.price_graph = PriceGraphWidget()
-        self.ta_graph = MultiPanelGraphWidget()
-        center_layout_2.addWidget(self.tickers_combo)
-        center_layout_2.addWidget(self.ta_graph)
-
-        main_layout_2.addLayout(center_layout_2)
-
-        # --- Таймер обновления графика ---
-        self.update_timer = QTimer(self)
-        self.update_timer.setInterval(10000)
-        self.update_timer.timeout.connect(self.update_chart)
-
-
-        # --- Окно для лога парсера ---        
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumHeight(120)
-
-        page_1_layout.addWidget(self.log)
-
-        self.log.setSizePolicy(
-            QSizePolicy.Expanding,
-            QSizePolicy.Fixed
-        )
-        self.log.setMaximumHeight(80)
-        
-
-        # --- Инициализация ---
-        self._last_good_state = None
-
-        parse_data(self)
-        data = get_last_hour_price(self.tickers_combo.currentText())
-        self.price_graph.plot_price(data)
-        prices = np.array([i["price"] for i in data])
-
-        self.ta_graph.update_all(data)
-        self.ta_graph.redraw()
-        self.update_timer.start()
-
-
-        self.parser_signals = ParserSignals()
-        self.parser_signals.status.connect(self.status_bar.showMessage)
-        self.parser_signals.status.connect(self.log.append)
-        self.parser_signals.error.connect(
-            lambda e: QMessageBox.critical(self, "Ошибка парсера", e)
+        self.figure = Figure(figsize=(5, 4))
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
         )
 
-        self.parser_thread = ParserThread(
-            APITOKEN,
-            get_all_tickers(),
-            self.parser_signals
+        self.ax = self.figure.add_subplot(111)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.canvas)
+
+        self.ax.grid(True)
+
+    def redraw(self):
+        self.canvas.draw_idle()
+
+class YAxisScalingMixin:
+
+    def nice_step(self, y_min, y_max, target_ticks=8):
+        diff = y_max - y_min
+        if diff <= 0:
+            return 1
+
+        raw_step = diff / target_ticks
+        nice_values = [1, 2, 5]
+
+        power = 10 ** np.floor(np.log10(raw_step))
+        norm = raw_step / power
+
+        nice_norm = min(nice_values, key=lambda x: abs(x - norm))
+        return nice_norm * power
+
+    def y_ticks(self, prices, n=10, padding_ratio=0.1):
+        y_min = prices.min()
+        y_max = prices.max()
+
+        if y_min == y_max:
+            return np.linspace(y_min - 1, y_max + 1, n + 1)
+
+        # === диапазон ===
+        diff = y_max - y_min
+
+        # === padding (10%) ===
+        padding = diff * padding_ratio
+        y_min -= padding
+        y_max += padding
+
+        # === шаг ===
+        step = (y_max - y_min) / n
+        power = 10 ** np.floor(np.log10(step))
+        step = power * np.ceil(step / power)
+
+        # === округляем границы ===
+        y_min = np.floor(y_min / step) * step
+        y_max = np.ceil(y_max / step) * step
+
+        return np.arange(y_min, y_max + step, step)
+        
+class PriceGraphWidget(BaseGraphWidget, YAxisScalingMixin):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.line_smooth, = self.ax.plot(
+            [], [], linewidth=2, label="Цена (сглажено)"
         )
-        self.parser_thread.start()
+        self.line_raw, = self.ax.plot(
+            [], [], alpha=0.3, label="Цена (сырые данные)"
+        )
 
+        self.ax.set_title("Динамика цены за последний час")
+        self.ax.set_xlabel("Время")
+        self.ax.set_ylabel("Цена")
+        self.ax.legend(loc="upper left")
 
-    # ------------------------ ОБРАБОТЧИКИ UI -------------------
+        self.ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
+        self.ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
 
-    def change_PECB(self):
-        self.set_active_radio(self.PE_CB, self.PE_group_button)
-        self.debt_CB.setEnabled(not(self.PE_CB.isChecked()))
-        self.ROE_CB.setEnabled(not(self.PE_CB.isChecked()))
-        apply_PE_mode(self)
+        # Для будущей стабилизации масштаба (как у тебя)
+        self._last_y_min = None
+        self._last_y_max = None
+        self._last_step = None
 
-    def change_ticker_combo(self):
-        data = get_last_hour_price(self.tickers_combo.currentText())
-        self.price_graph.plot_price(data)
-        prices = np.array([i["price"] for i in data])
-
-        self.ta_graph.update_all(data)
-        self.ta_graph.redraw()
-        self.update_timer.start()
-
-
-    def change_debt(self):
-        self.set_active_radio(self.debt_CB, self.debt_group_button)
-        self.PE_CB.setEnabled(not(self.debt_CB.isChecked()))
-        self.ROE_CB.setEnabled(not(self.debt_CB.isChecked()))
-        apply_debt_mode(self)
-
-    def change_divCB(self):
-        if self.PE_CB.isChecked():
-            apply_PE_mode(self)
-        elif self.debt_CB.isChecked():
-            apply_debt_mode(self)
-        elif self.ROE_CB.isChecked():
-            apply_ROE_mode(self)
-        else:
-            apply_filters(self)
-
-    def change_ROECB(self):
-        self.set_active_radio(self.ROE_CB, self.ROE_group_button)
-        self.debt_CB.setEnabled(not(self.ROE_CB.isChecked()))
-        self.PE_CB.setEnabled(not(self.ROE_CB.isChecked()))
-        apply_ROE_mode(self)
-
-
-    def set_sector(self):
-        if self.PE_CB.isChecked():
-            apply_PE_mode(self)
-        elif self.debt_CB.isChecked():
-            apply_debt_mode(self)
-        elif self.ROE_CB.isChecked():
-            apply_ROE_mode(self)
-        else:
-            apply_filters(self)
-
-    def on_radio_changed(self, button):
-        if button in self.PE_group_button.buttons():
-            apply_PE_mode(self)
-        elif button in self.debt_group_button.buttons():
-            apply_debt_mode(self)
-        elif button in self.ROE_group_button.buttons():
-            apply_ROE_mode(self)
-
-    # ------------------------ ВСПОМОГАТЕЛЬНЫЕ ------------------
-
-    def set_active_radio(self, CB = QCheckBox, group_button = QButtonGroup):
-        isChecked = CB.isChecked()
-        for btn in group_button.buttons():
-            btn.setEnabled(isChecked)
-
-    def get_active_rb(self, group_button = QButtonGroup):
-        for btn in group_button.buttons():
-            if btn.isChecked():
-                return btn
-
-    def save_state(self):
-        """Сохраняет минимальный снимок корректного состояния UI."""
-        rb_pe = self.get_active_rb(self.PE_group_button)
-        active_rb_pe = rb_pe.text() if rb_pe else None
-        
-        rb_debt = self.get_active_rb(self.debt_group_button)
-        active_rb_debt = rb_debt.text() if rb_debt else None
-        
-        rb_roe = self.get_active_rb(self.ROE_group_button)
-        active_rb_roe = rb_roe.text() if rb_roe else None
-
-        self._last_good_state = {
-            "pe_checked": self.PE_CB.isChecked(),
-            "div_checked": self.div_check.isChecked(),
-            "debt_checked": self.debt_CB.isChecked(),
-            "roe_checked": self.ROE_CB.isChecked(),
-            "active_rb_pe": active_rb_pe,
-            "active_rb_debt": active_rb_debt,
-            "active_rb_roe": active_rb_roe,
-            "combo_items": [self.emitter_combo.itemText(i) for i in range(self.emitter_combo.count())],
-            "combo_current": self.emitter_combo.currentText(),
-            "combo_enabled": self.emitter_combo.isEnabled(),
-            "sector_current": self.filter_box.currentText()
-        }
-
-    def restore_state(self):
-        """Восстановление последнего успешного состания в случае, если пользователь задал невозможный вариант фильтрации"""
-        if not self._last_good_state:
-            return
-        st = self._last_good_state
-
-        self.filter_box.blockSignals(True)
-        self.emitter_combo.blockSignals(True)
-
-        with QSignalBlocker(self.PE_CB):
-            self.PE_CB.setChecked(st["pe_checked"])
-
-        with QSignalBlocker(self.div_check):
-            self.div_check.setChecked(st["div_checked"])
-
-        with QSignalBlocker(self.debt_CB):
-            self.debt_CB.setChecked(st["debt_checked"])
-
-        with QSignalBlocker(self.debt_CB):
-            self.ROE_CB.setChecked(st["roe_checked"])
-
-        for b in self.PE_group_button.buttons():
-            with QSignalBlocker(b):
-                b.setChecked(b.text() == st.get("active_rb_pe"))
-
-        for b in self.debt_group_button.buttons():
-            with QSignalBlocker(b):
-                b.setChecked(b.text() == st.get("active_rb_debt"))
-        
-        for b in self.ROE_group_button.buttons():
-            with QSignalBlocker(b):
-                b.setChecked(b.text() == st.get("active_rb_roe"))
-
-
-        self.emitter_combo.clear()
-        self.emitter_combo.addItems(st["combo_items"])
-        if st["combo_current"] in st["combo_items"]:
-            self.emitter_combo.setCurrentText(st["combo_current"])
-        elif self.emitter_combo.count() > 0:
-            self.emitter_combo.setCurrentIndex(0)
-        self.emitter_combo.setEnabled(st["combo_enabled"])
-
-        self.filter_box.setCurrentText(st["sector_current"])
-
-        self.filter_box.blockSignals(False)
-        self.emitter_combo.blockSignals(False)
-
-        if self.PE_CB.isChecked():
-            apply_PE_mode(self)
-        elif self.debt_CB.isChecked():
-            apply_debt_mode(self)
-        elif self.ROE_CB.isChecked():
-            apply_ROE_mode(self)
-        else:
-            apply_filters(self)
-
-        QApplication.processEvents()
-
-    def handle_no_results(self):
-        self.restore_state()
-        QMessageBox.warning(self, "Предупреждение", "Не найдено ни одной компании с заданными фильтрами")
-
-    def update_chart(self):
-        ticker = self.tickers_combo.currentText()  # выбранный в UI тикер
-        if not ticker:
-            return
-
-        data = get_last_hour_price(ticker)
-
+    def plot_price(self, data):
         if not data:
             return
+        
+        # Берем только ПОСЛЕДНИЕ 12 точек (или сколько нужно)
+        MAX_POINTS = 12
+        recent_data = data[-MAX_POINTS:]  # ← ВАЖНО!
+        
+        prices = np.array([i["price"] for i in recent_data])
+        times = [i["_id"] for i in recent_data]
+        
+        # Далее твой обычный код:
+        x = np.arange(len(prices))
+        
+        self.line_raw.set_data(x, prices)
+        self.line_smooth.set_data(x, prices)
+        
+        self.ax.set_xlim(0, len(x) - 1)
+        
+        # X axis labels - только для этих 12 точек
+        if len(times) <= 12:
+            # Показываем все метки
+            xticks = x
+            xlabels = [t.strftime("%H:%M") for t in times]
+        else:
+            # Показываем каждую N-ю метку
+            step = max(1, len(x) // 6)  # 6 меток максимум
+            xticks = x[::step]
+            xlabels = [times[i].strftime("%H:%M") for i in range(0, len(times), step)]
+        
+        self.ax.set_xticks(xticks)
+        self.ax.set_xticklabels(xlabels)
+        
+        # ВРАЩЕНИЕ И ВЫРАВНИВАНИЕ МЕТОК!
+        for label in self.ax.get_xticklabels():
+            label.set_rotation(45)
+            label.set_horizontalalignment("right")
+        
+        # Ось Y (этого не было в твоем коде!)
+        ticks = self.y_ticks(prices, 10)
+        self.ax.set_ylim(ticks[0], ticks[-1])
+        self.ax.set_yticks(ticks)
+        
+        self.redraw()  # ← Добавить!
 
-        MultiPanelGraphWidget.update_all(self.ta_graph,data)
+
+
+class TechnicalAnalysisGraphWidget(PriceGraphWidget):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.support_lines = []
+        self.resistance_lines = []
+        self.trend_lines = []
+
+    # ===== Заготовки под TA =====
+
+    def draw_support(self, y):
+        line = self.ax.axhline(
+            y, linestyle="--", color="green", alpha=0.6, label="Поддержка"
+        )
+        self.support_lines.append(line)
+        self.redraw()
+
+    def draw_resistance(self, y):
+        line = self.ax.axhline(
+            y, linestyle="--", color="red", alpha=0.6, label="Сопротивление"
+        )
+        self.resistance_lines.append(line)
+        self.redraw()
+
+    def draw_trend(self, x1, y1, x2, y2):
+        line, = self.ax.plot(
+            [x1, x2], [y1, y2], color="blue", linewidth=1.5, label="Тренд"
+        )
+        self.trend_lines.append(line)
+        self.redraw()
+
+class MultiPanelGraphWidget(QWidget, YAxisScalingMixin):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # === Figure / Canvas ===
+        self.figure = Figure(figsize=(10, 8))
+        self.canvas = FigureCanvas(self.figure)
+
+        self.canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding
+        )
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.canvas)
+
+        # === GridSpec (пропорции как в терминалах) ===
+        gs = self.figure.add_gridspec(
+            3, 1,
+            height_ratios=[4, 1.5, 1.5],
+            hspace=0.15
+        )
+
+        self.ax_price = self.figure.add_subplot(gs[0])
+        self.ax_adx   = self.figure.add_subplot(gs[1], sharex=self.ax_price)
+        self.ax_rsi   = self.figure.add_subplot(gs[2], sharex=self.ax_price)
+
+        # === оформление ===
+        self.ax_price.set_title("Цена")
+        self.ax_adx.set_ylabel("ADX")
+        self.ax_rsi.set_ylabel("RSI")
+
+        for ax in (self.ax_price, self.ax_adx, self.ax_rsi):
+            ax.grid(True)
+
+        # скрываем X подписи у верхних панелей
+        self.ax_price.tick_params(labelbottom=False)
+        self.ax_adx.tick_params(labelbottom=False)
+        
+        self.ax_rsi.set_autoscale_on(False)
+        self.ax_adx.set_autoscale_on(False)
+
+        # === линии (создаются ОДИН РАЗ) ===
+        self.price_line, = self.ax_price.plot([], [], linewidth=2, label="Цена")
+
+        self.adx_line, = self.ax_adx.plot([], [], color="orange", label="ADX", clip_on=True)
+        self.rsi_line, = self.ax_rsi.plot([], [], color="purple", label="RSI", clip_on=True)
+
+        self.ax_price.legend(loc="upper left")
+
+        # уровни RSI (один раз!)
+        self.ax_rsi.axhline(30, linestyle="--", alpha=0.3)
+        self.ax_rsi.axhline(70, linestyle="--", alpha=0.3)
+        self.rsi_line.set_clip_on(True)
+
+        RSI_MIN = 0
+        RSI_MAX = 100
+        RSI_PADDING = 5  # визуальный отступ
+
+        self.ax_rsi.set_ylim(
+            RSI_MIN - RSI_PADDING,
+            RSI_MAX + RSI_PADDING
+        )
+
+        self.ax_rsi.set_yticks([0, 30, 50, 70, 100])
+        self.ax_rsi.set_autoscale_on(False)
+
+        ADX_MIN = 0
+        ADX_MAX = 60
+        ADX_PADDING = 3
+
+        self.ax_adx.set_ylim(
+            ADX_MIN - ADX_PADDING,
+            ADX_MAX + ADX_PADDING
+        )
+
+        self.ax_adx.set_yticks([0, 20, 40, 60])
+        self.ax_adx.set_autoscale_on(False)
+
+
+        self.adx_line.set_clip_on(True)
+
+
+        self.ax_rsi.fill_between(
+            [0, 1],
+            70, 100,
+            color="red",
+            alpha=0.05,
+            transform=self.ax_rsi.get_yaxis_transform()
+        )
+
+        self.ax_rsi.fill_between(
+            [0, 1],
+            0, 30,
+            color="green",
+            alpha=0.05,
+            transform=self.ax_rsi.get_yaxis_transform()
+        )
 
 
 
-# -------------------------- START -------------------------------
+    # =====================================================================================
+    # ОБНОВЛЕНИЕ ЦЕНЫ + ВРЕМЕНИ
+    # =====================================================================================
 
-def start():
-    app = QApplication(sys.argv)
-    window = StockAnalyzerApp()
-    window.show()
-    sys.exit(app.exec())
+    def update_price(self, data):
+        if data is None or len(data) == 0:
+            return
+        
+        prices = np.array([i["price"] for i in data])
+        times = [i["_id"] for i in data]
+        
+        # Индексы вместо времени на оси X
+        x_indices = np.arange(len(prices))
+        
+        self.price_line.set_data(x_indices, prices)
+        self.ax_price.set_xlim(0, len(prices) - 1)
+        
+        # Устанавливаем 12 меток на нижней панели
+        self.set_12_xticks_for_multipanel(x_indices, times)
+        
+        # Ось Y
+        ticks = self.y_ticks(prices, 10)
+        self.ax_price.set_ylim(ticks[0], ticks[-1])
+        self.ax_price.set_yticks(ticks)
+
+    def update_all(self, data):
+        """
+        Обновляет ВСЕ панели за один вызов.
+        data: list[dict] -> [{ "_id": datetime, "price": float }, ...]
+        """
+        if data is None or len(data) == 0:
+            return
+        
+        # Извлекаем данные
+        prices = np.array([i["price"] for i in data])
+        times = [i["_id"] for i in data]
+        
+        # 1. Используем ИНДЕКСЫ везде
+        x_indices = np.arange(len(prices))
+        
+        # 2. Обновляем цену с индексами
+        self.price_line.set_data(x_indices, prices)
+        self.ax_price.set_xlim(0, len(prices) - 1)
+        
+        # 3. Обновляем RSI с индексами
+        self.update_rsi(prices, x_indices)
+        
+        # 4. Обновляем ADX с индексами
+        self.update_adx(prices, x_indices)
+        
+        # 5. Устанавливаем подписи оси X
+        self.set_12_xticks_for_multipanel(x_indices, times)
+        
+        # 6. Ось Y для цены
+        ticks = self.y_ticks(prices, 10)
+        self.ax_price.set_ylim(ticks[0], ticks[-1])
+        self.ax_price.set_yticks(ticks)
+        
+        # 7. Перерисовываем
+        self.redraw()
+
+    def update_rsi(self, prices, x_indices, period=14):
+        if len(prices) < period + 1:
+            return
+
+        deltas = np.diff(prices)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+
+        avg_gain = np.convolve(gains, np.ones(period) / period, mode="valid")
+        avg_loss = np.convolve(losses, np.ones(period) / period, mode="valid")
+
+        rs = avg_gain / (avg_loss + 1e-9)
+        rsi = 100 - (100 / (1 + rs))
+
+        # 🔒 КЛАМП (КРИТИЧНО)
+        rsi = np.clip(rsi, 0, 100)
+
+        rsi_indices = x_indices[-len(rsi):]
+
+        self.rsi_line.set_data(rsi_indices, rsi)
+
+    def update_adx(self, prices, x_indices, period=14):
+        if len(prices) < 2 * period + 1:
+            return
+
+        high = prices
+        low = prices
+        close = prices
+
+        tr = np.maximum.reduce([
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1]),
+        ])
+
+        plus_dm = np.maximum(high[1:] - high[:-1], 0)
+        minus_dm = np.maximum(low[:-1] - low[1:], 0)
+
+        plus_dm[plus_dm < minus_dm] = 0
+        minus_dm[minus_dm < plus_dm] = 0
+
+        tr_smooth = np.convolve(tr, np.ones(period), mode="valid")
+        plus_dm_smooth = np.convolve(plus_dm, np.ones(period), mode="valid")
+        minus_dm_smooth = np.convolve(minus_dm, np.ones(period), mode="valid")
+
+        plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-9)
+        minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-9)
+
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
+
+        adx = np.convolve(dx, np.ones(period) / period, mode="valid")
+
+        # 🔒 КЛАМП
+        adx = np.clip(adx, 0, 60)
+
+        adx_indices = x_indices[-len(adx):]
+
+        self.adx_line.set_data(adx_indices, adx)
+
+
+
+    def set_12_xticks_for_multipanel(self, x_indices, times):
+        """Устанавливает 12 меток для всех панелей"""
+        if len(x_indices) == 0:
+            return
+        
+        # Выбираем 12 индексов равномерно
+        n_ticks = min(12, len(x_indices))
+        
+        # Если данных мало - показываем все
+        if len(x_indices) <= n_ticks:
+            xticks = x_indices
+            xlabels = [t.strftime("%H:%M") for t in times]
+        else:
+            # Равномерно распределяем
+            step = len(x_indices) / n_ticks
+            xticks = []
+            xlabels = []
+            
+            for i in range(n_ticks):
+                idx = int(i * step)
+                if idx < len(x_indices):
+                    xticks.append(x_indices[idx])
+                    xlabels.append(times[idx].strftime("%H:%M"))
+        
+        # Устанавливаем только на нижней панели
+        self.ax_rsi.set_xticks(xticks)
+        self.ax_rsi.set_xticklabels(xlabels)
+        
+        # Устанавливаем те же тики на других панелях (но без подписей)
+        self.ax_price.set_xticks(xticks)
+        self.ax_adx.set_xticks(xticks)
+        
+        # Поворот меток
+        for label in self.ax_rsi.get_xticklabels():
+            label.set_rotation(45)
+            label.set_horizontalalignment("right")
+    # =====================================================================================
+    # ПЕРЕРИСОВКА
+    # =====================================================================================
+
+    def redraw(self):
+        self.canvas.draw_idle()
