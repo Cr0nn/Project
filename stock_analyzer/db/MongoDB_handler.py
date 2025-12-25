@@ -1,11 +1,13 @@
 #Файл для работы с MongoDB
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
+from pymongo import InsertOne
 from numpy import average, median
 import numpy as np
-from config import MONGODB_URI
-from config import DB_NAME
+from config_folder.config import MONGODB_URI
+from config_folder.config import DB_NAME
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 
 
@@ -80,76 +82,6 @@ def get_all_em_id():
     return result #Все id Компаний
 
 
-def debug_structure():
-    collection = db["Price_info"]
-    """
-    Показывает реальную структуру документов для отладки
-    """
-    # Найдем последний документ
-    last_doc = collection.find_one(sort=[('date', -1)])
-    
-    if last_doc:
-        print("Структура документа:")
-        print(f"Date: {last_doc['date']}")
-        print(f"Minute_data length: {len(last_doc.get('minute_data', []))}")
-        
-        if last_doc.get('minute_data'):
-            print("\nПервые 3 элемента minute_data:")
-            for i, minute in enumerate(last_doc['minute_data'][:3]):
-                print(f"  [{i}]: timestamp={minute.get('timestamp')}")
-                print(f"       prices keys: {list(minute.get('prices', {}).keys())[:5]}")  # Первые 5 ключей
-                
-        print("\nПолная структура одного элемента minute_data:")
-        if last_doc.get('minute_data'):
-            import json
-            print(json.dumps(last_doc['minute_data'][0], indent=2, default=str))
-
-
-                
-    
-# def find_all_sector():
-#     collections = db[""]
-#     docs = collections.find_one({"_id":"Sectors"})
-#     all_sector = [key for key, value in docs.items() if key != "_id"]
-#     all_sector.append("Все секторы")
-#     return all_sector
-
-
-def insert_current_price(data_dict):
-
-    
-    try:
-        collection = db["Price_info"]
-        date_value = data_dict['date']
-        day_date = date_value.replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # Удаляем дату из словаря, оставшиеся ключи - тикеры
-        data_without_date = data_dict.copy()
-        del data_without_date['date']
-        
-        # Создаем минутную запись
-        minute_record = {
-            'timestamp': date_value,
-            **data_without_date  # Распаковываем все тикеры напрямую
-        }
-        
-        print(f"Данные для записи: {minute_record}")
-        
-        result = collection.update_one(
-            {'date': day_date},
-            {
-                '$push': {'minute_data': minute_record},
-                '$setOnInsert': {'date': day_date}
-            },
-            upsert=True
-        )
-        
-        return result
-        
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        return None
-
 def get_em_name(em_id):
     collections = db["Companies"]
     result = [collections.find_one({'_id': i}, {'name' : 1})["name"] for i in em_id]
@@ -184,59 +116,36 @@ def get_none_value(TICKERS): #Тест функция, пока будет
             all_none.append(collections1.find_one({"_id":id})["ticker"])
     return all_none
 
-def get_last_hour_price(ticker):
-    collection = db["Price_info"]
-    indexes = list(collection.list_indexes())
-    if len(indexes) == 0:
-        collection.create_index([("date", 1), ("minute_data.timestamp", 1)], name="date_timestamp_index")
-        indexes = list(collection.list_indexes())
+def get_last_hour_price(name):
+    collection = db["prices_1m"]
+    ticker = list(db["Companies"].find({"name" : name}, {"ticker" : 1, "_id" : 0}))[0]["ticker"]
 
-    end_time = datetime.now()
-    start_time = end_time - timedelta(hours=1)
-    
-    print(f"Поиск {ticker} с {start_time} по {end_time}")
-    
     pipeline = [
+        {"$match": {"meta.ticker": ticker}},
         {
-            '$match': {
-                'date': start_time.replace(hour=0, minute=0, second=0, microsecond=0)
-            }
-        },
-        {
-            '$unwind': '$minute_data'
-        },
-        {
-            '$match': {
-                'minute_data.timestamp': {
-                    '$gte': start_time,
-                    '$lte': end_time
+            "$group": {
+                "_id": {
+                    "$dateTrunc": {
+                        "date": "$timestamp",
+                        "unit": "minute"
+                    }
                 },
-                f'minute_data.{ticker}': {'$exists': True, '$ne': None}   #Ограничение за последний час, пока убрал
+                "price": {"$last": "$price"}
             }
         },
-        {
-            '$project': {
-                '_id': 0,  # Исключаем _id
-                'timestamp': '$minute_data.timestamp',
-                'price': f'$minute_data.{ticker}'
-            }
-        },
-        {
-            '$sort': {'timestamp': 1}
-        }
+        {"$sort": {"_id": -1}},
+        {"$limit": 60},
+        {"$sort": {"_id": 1}}
     ]
     
     collection = list(collection.aggregate(pipeline))
-    print(f"Найдено {len(collection)} записей из 60 возможных для {ticker}")
-    return collection #Возвращает список из dict вида {'timestamp': datetime.datetime(2025, 11, 18, 19, 49, 29, 560000), 'price': 121.34}
+    delete_zero()
+    return collection
 
 
 def PE_filter(Companies, sector):
-    collections1 = db["Companies"]
     collections2 = db["Finans_info"]
-    none_check = lambda x: "0" if x is None else x.replace(" ", "") #Функция отлавливания значений None в таблице + замена пробелов в числах формата 1 689
     PE = {}
-    avg = []
     for i in Companies:
         Current_PE = []
         pipeline = [
@@ -639,7 +548,7 @@ def build_debtmetric_project(sector):
                 }
             }
     else:
-                return {
+        return {
             "$project" : 
                 {
                     "_id" : 0,
@@ -648,7 +557,7 @@ def build_debtmetric_project(sector):
                             "$map":
                             {
                                 "input" : 
-                                    {
+                                    {   
                                         "$filter" : 
                                             {
                                                 "input" : "$info_array",
@@ -862,7 +771,6 @@ def avg_metric(sector, metric):
         }
 
     ]
-    print(list(collection2.aggregate(pipeline)))
     return np.median(list(collection2.aggregate(pipeline))[0]["values"])
 
 def build_rawvalue_project(metric):
@@ -885,8 +793,130 @@ def build_rawvalue_project(metric):
                 "rawValue": f"$last.v.{metric}"
             }
         }
+    
+def ts_tickers(): 
+    collection = db["prices"]
+    return list(collection.distinct("ticker"))
+
+def ticker_to_name():
+    collection = db["Companies"]
+    findes = ts_tickers()
+    result = list(collection.find(
+        {"ticker" : {"$in" : findes}},
+        {"name" : 1, "ticker" : 1, "_id" : 0}
+    ))
+    return [i.get("name") for i in result]
 
 
+def save_prices(data):
 
+    collection = db["prices_1m"]
+    ts = data["date"]
+    ops = [
+        InsertOne({
+            "meta" : {
+                "ticker" : ticker,
+                "tf" : "1m"
+            },
+            "price": float(price),
+            "timestamp": ts
+        })
+        for ticker, price in data.items()
+        if ticker != "date"
+    ]
+    if ops:
+        collection.bulk_write(ops, ordered=False)
 
+def delete_zero():
+    collection = db["prices_1m"]
+    collection.delete_many({"price" : 0})
+
+def floor_time(dt, delta):
+    return dt - (dt - dt.min) % delta
+
+def aggregate_and_insert(
+    source_col,
+    target_col,
+    ticker: str,
+    interval_minutes: int,
+    min_fill_ratio: float = 0.6
+):
+    """
+    Агрегирует данные из source_col в интервалы interval_minutes
+    и записывает результат в target_col (MongoDB TimeSeries).
+
+    - Open  = первая цена интервала
+    - Close = последняя цена интервала
+    - timestamp = время закрытия
+    """
+
+    interval = timedelta(minutes=interval_minutes)
+
+    # Узнаём последний записанный timestamp (инкрементально)
+    last_doc = target_col.find_one(
+        {"meta.ticker": ticker},
+        sort=[("timestamp", -1)]
+    )
+
+    query = {"meta.ticker": ticker}
+    if last_doc:
+        query["timestamp"] = {"$gt": last_doc["timestamp"]}
+
+    cursor = (
+        source_col
+        .find(query, {"_id": 0})
+        .sort("timestamp", 1)
+    )
+
+    buckets = defaultdict(list)
+
+    for doc in cursor:
+        price = doc.get("price")
+        ts = doc.get("timestamp")
+
+        # защита от мусора
+        if price is None or price <= 0:
+            continue
+
+        close_time = floor_time(ts, interval) + interval
+        buckets[close_time].append(price)
+
+    expected_points = interval_minutes  # 1 точка = 1 минута
+
+    for close_time, prices in buckets.items():
+        # фильтр дыр
+        if len(prices) < expected_points * min_fill_ratio:
+            continue
+
+        open_price = prices[0]
+        close_price = prices[-1]
+
+        doc = {
+            "timestamp": close_time,
+            "meta": {
+                "ticker": ticker,
+                "tf": f"{interval_minutes}m"
+            },
+            "open": float(open_price),
+            "close": float(close_price)
+        }
+
+        target_col.update_one(
+            {
+                "meta.ticker": ticker,
+                "timestamp": close_time
+            },
+            {"$set": doc},
+            upsert=True
+        )
+
+# def create_col():
+#     db.create_collection(
+#     "prices_1m",
+#     timeseries={
+#         "timeField": "timestamp",
+#         "metaField": "meta",
+#         "granularity": "minutes"
+#     }
+# )
 
