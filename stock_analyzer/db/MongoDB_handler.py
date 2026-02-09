@@ -2,6 +2,9 @@
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 from pymongo import InsertOne
+from pymongo.operations import UpdateOne
+from pymongo.collection import Collection
+from pymongo.operations import ReplaceOne
 from numpy import average, median
 import numpy as np
 from config_folder.config import MONGODB_URI
@@ -131,6 +134,32 @@ def get_last_hour_price(name):
                     }
                 },
                 "price": {"$last": "$price"}
+            }
+        },
+        {"$sort": {"_id": -1}},
+        {"$limit": 60},
+        {"$sort": {"_id": 1}}
+    ]
+    
+    collection = list(collection.aggregate(pipeline))
+    delete_zero()
+    return collection
+
+def get_last_hour_price_5(name):
+    collection = db["prices_5m"]
+    ticker = list(db["Companies"].find({"name" : name}, {"ticker" : 1, "_id" : 0}))[0]["ticker"]
+
+    pipeline = [
+        {"$match": {"meta.ticker": ticker}},
+        {
+            "$group": {
+                "_id": {
+                    "$dateTrunc": {
+                        "date": "$timestamp",
+                        "unit": "minute"
+                    }
+                },
+                "price": {"$last": "$close"}
             }
         },
         {"$sort": {"_id": -1}},
@@ -834,81 +863,93 @@ def delete_zero():
 def floor_time(dt, delta):
     return dt - (dt - dt.min) % delta
 
-def aggregate_and_insert(
-    source_col,
-    target_col,
-    ticker: str,
-    interval_minutes: int,
-    min_fill_ratio: float = 0.6
-):
+def floor_to_interval(dt: datetime, interval_min: int) -> datetime:
+    """Округляет вниз до начала интервала (например 5 минут)"""
+    minutes = (dt.minute // interval_min) * interval_min
+    return dt.replace(minute=minutes, second=0, microsecond=0)
+
+
+def save_5m_candles(data: dict, target_collection, min_fill_ratio: float = 0.6):
     """
-    Агрегирует данные из source_col в интервалы interval_minutes
-    и записывает результат в target_col (MongoDB TimeSeries).
-
-    - Open  = первая цена интервала
-    - Close = последняя цена интервала
-    - timestamp = время закрытия
-    """
-
-    interval = timedelta(minutes=interval_minutes)
-
-    # Узнаём последний записанный timestamp (инкрементально)
-    last_doc = target_col.find_one(
-        {"meta.ticker": ticker},
-        sort=[("timestamp", -1)]
-    )
-
-    query = {"meta.ticker": ticker}
-    if last_doc:
-        query["timestamp"] = {"$gt": last_doc["timestamp"]}
-
-    cursor = (
-        source_col
-        .find(query, {"_id": 0})
-        .sort("timestamp", 1)
-    )
-
-    buckets = defaultdict(list)
-
-    for doc in cursor:
-        price = doc.get("price")
-        ts = doc.get("timestamp")
-
-        # защита от мусора
-        if price is None or price <= 0:
-            continue
-
-        close_time = floor_time(ts, interval) + interval
-        buckets[close_time].append(price)
-
-    expected_points = interval_minutes  # 1 точка = 1 минута
-
-    for close_time, prices in buckets.items():
-        # фильтр дыр
-        if len(prices) < expected_points * min_fill_ratio:
-            continue
-
-        open_price = prices[0]
-        close_price = prices[-1]
-
-        doc = {
-            "timestamp": close_time,
-            "meta": {
-                "ticker": ticker,
-                "tf": f"{interval_minutes}m"
-            },
-            "open": float(open_price),
-            "close": float(close_price)
+    Принимает данные в формате:
+        {
+            "date": datetime,
+            "SBER": 315.20,
+            "GAZP": 142.50,
+            ...
         }
 
-        target_col.update_one(
-            {
-                "meta.ticker": ticker,
-                "timestamp": close_time
+    Агрегирует их в 5-минутные свечи (OHLC) и вставляет в time-series коллекцию,
+    только если свеча ещё не существует и заполнена достаточно.
+    """
+    ts = data["date"]                   # это время замера цен
+    interval_min = 5
+    interval = timedelta(minutes=interval_min)
+
+    # Вычисляем, к какой свече относится этот timestamp
+    # bucket_start — начало 5-минутного интервала
+    bucket_start = ts.replace(
+        minute=(ts.minute // interval_min) * interval_min,
+        second=0,
+        microsecond=0
+    )
+    # время закрытия свечи
+    bucket_close = bucket_start + interval
+
+    # Если текущее время ещё не дошло до конца свечи → ничего не делаем
+    if ts < bucket_close:
+        # свеча ещё не закрылась — ждём следующего вызова
+        return 0
+
+    # Собираем все цены по тикерам для этой свечи
+    buckets = defaultdict(list)
+
+    for ticker, price in data.items():
+        if ticker == "date":
+            continue
+        if not isinstance(price, (int, float)) or price <= 0:
+            continue
+        buckets[ticker].append(price)
+
+    ops = []
+    inserted = 0
+
+    for ticker, prices in buckets.items():
+        if len(prices) < interval_min * min_fill_ratio:
+            continue  # слишком мало точек
+
+        prices_sorted = sorted(prices)  # на всякий случай, хотя обычно порядок сохраняется
+
+        doc = {
+            "timestamp": bucket_close,
+            "meta": {
+                "ticker": ticker,
+                "tf": "5m"
             },
-            {"$set": doc},
-            upsert=True
-        )
+            "open": float(prices_sorted[0]),
+            "high": float(max(prices_sorted)),
+            "low": float(min(prices_sorted)),
+            "close": float(prices_sorted[-1]),
+            "filled_count": len(prices_sorted),
+            "filled_ratio": round(len(prices_sorted) / interval_min, 3),
+        }
+
+        ops.append(InsertOne(doc))
+
+    if not ops:
+        return 0
+
+    try:
+        result = target_collection.bulk_write(ops, ordered=False)
+        inserted = len(result.inserted_ids) if hasattr(result, 'inserted_ids') else len(ops)
+        # inserted_count = result.inserted_count  — в новых версиях pymongo
+    except Exception as e:
+        # можно добавить logging
+        print(f"Ошибка bulk_write 5m: {e}")
+        return 0
+
+    print("Пятиминутная агрегация")
+    return inserted
 
 # def create_col():
 #     db.create_collection(
@@ -919,4 +960,3 @@ def aggregate_and_insert(
 #         "granularity": "minutes"
 #     }
 # )
-
